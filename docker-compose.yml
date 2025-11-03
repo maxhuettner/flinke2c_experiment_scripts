@@ -1,0 +1,12 @@
+services:
+  a:
+    build: .
+    ports:
+      - "2222:22"
+  b:
+    build: .
+    ports:
+      - "2223:22"
+  # client:
+  #   build:
+  #     dockerfile: Dockerfile.client
