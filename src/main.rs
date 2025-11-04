@@ -1,10 +1,11 @@
-use std::env;
+use std::{env, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dotenv::dotenv;
-use tokio::io::AsyncWriteExt;
+use russh::Sig;
+use tokio::{io::AsyncWriteExt, task, time::sleep};
 
-use crate::{graph::build_graph_from_file, ssh::connect};
+use crate::{graph::build_graph_from_file, ssh::{comm_session::SessionCommand, connect}};
 
 mod graph;
 mod ssh;
@@ -25,13 +26,31 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let mut rx = session.send_command("cat /etc/os-release").await?;
+    let session = session.start_session().await?;
+
+    let session_cmds = session.command_tx();
+    let session_resps = session.response_rx();
+
+    session_cmds.send(SessionCommand::Data("tail -f /etc/os-release".to_string()))?;
 
     let mut stdout = tokio::io::stdout();
-    while let Some(ref data) = rx.recv().await {
+    if let Ok(data) = session_resps.recv().await {
         stdout.write_all(data.as_bytes()).await?;
         stdout.flush().await?;
     }
+
+    let session_cmds_clone = session_cmds.clone();
+    task::spawn(async move {
+        sleep(Duration::from_secs(5)).await;
+        session_cmds_clone.send(SessionCommand::Signal(Sig::INT)).unwrap();
+    });
+
+    if let Ok(data) = session_resps.recv().await {
+        stdout.write_all(data.as_bytes()).await?;
+        stdout.flush().await?;
+    }
+
+    session.stop().await?;
 
     println!(
         "Loaded topology {:?} with {} nodes and {} edges",

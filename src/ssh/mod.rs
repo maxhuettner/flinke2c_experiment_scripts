@@ -1,5 +1,6 @@
 pub mod client;
 pub mod session;
+pub mod comm_session;
 
 use std::{env, path::PathBuf, sync::Arc};
 

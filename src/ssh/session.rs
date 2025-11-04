@@ -1,11 +1,9 @@
-use russh::{ChannelMsg, client::Handle};
-use tokio::{
-    select,
-    sync::mpsc::{self, UnboundedReceiver},
-    task::{self},
-};
+use russh::client::Handle;
 
-use crate::ssh::client::Client;
+use crate::ssh::{
+    client::Client,
+    comm_session::CommSession,
+};
 
 pub struct Session {
     handle: Handle<Client>,
@@ -16,40 +14,9 @@ impl Session {
         Self { handle }
     }
 
-    pub async fn send_command(&self, command: &str) -> anyhow::Result<UnboundedReceiver<String>> {
-        let mut channel = self.handle.channel_open_session().await?;
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
-
-        channel.exec(true, command).await?;
-        task::spawn(async move {
-            loop {
-                let msg = select! {
-                        msg = channel.wait() => {
-                        msg
-                    }
-                    _ = tx.closed() => {
-                        None
-                    }
-                };
-                let Some(msg) = msg else {
-                    break;
-                };
-                match msg {
-                    ChannelMsg::Data { ref data } => {
-                        tx.send(String::from_utf8(data.to_vec()).unwrap()).unwrap();
-                    }
-                    ChannelMsg::ExtendedData { ref data, ext: _ } => {
-                        tx.send(String::from_utf8(data.to_vec()).unwrap()).unwrap();
-                    }
-                    ChannelMsg::ExitStatus { exit_status } => {
-                        println!("Exited {}", exit_status)
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        Ok(rx)
+    pub async fn start_session(&self) -> anyhow::Result<CommSession> {
+        let comm_session = CommSession::start_from_handle(&self.handle).await?;
+        Ok(comm_session)
     }
 
     pub fn handle(&self) -> &Handle<Client> {
