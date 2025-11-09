@@ -11,7 +11,7 @@ pub mod topo_edge;
 pub mod topo_node;
 
 #[derive(Debug, Deserialize)]
-struct TopologyConfig {
+pub struct TopologyConfig {
     nodes: Vec<TopoNode>,
     edges: Vec<TopologyConfigEdge>,
 }

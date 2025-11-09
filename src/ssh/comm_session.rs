@@ -10,6 +10,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, Span, info};
 
 use crate::ssh::client::Client;
 
@@ -31,13 +32,12 @@ impl CommSession {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
         let (response_tx, response_rx) = async_channel::unbounded::<String>();
         let channel = handle.channel_open_session().await?;
+        let session_span = Span::current();
 
-        let join_handle = task::spawn(Self::communication_task(
-            channel,
-            cancellation_token.clone(),
-            command_rx,
-            response_tx.clone(),
-        ));
+        let join_handle = task::spawn(
+            Self::communication_task(channel, cancellation_token.clone(), command_rx, response_tx)
+                .instrument(session_span),
+        );
 
         Ok(Self {
             cancellation_token,
@@ -46,6 +46,8 @@ impl CommSession {
             response_rx,
         })
     }
+
+    pub fn send_blocking() {}
 
     pub fn command_tx(&self) -> mpsc::UnboundedSender<SessionCommand> {
         self.command_tx.clone()
@@ -96,13 +98,23 @@ impl CommSession {
             };
             match msg {
                 ChannelMsg::Data { ref data } => {
-                    tx.send(String::from_utf8(data.to_vec())?).await?;
+                    info!("data");
+                    tx.send(String::from_utf8_lossy(data).to_string()).await?;
                 }
                 ChannelMsg::ExtendedData { ref data, ext: _ } => {
-                    tx.send(String::from_utf8(data.to_vec())?).await?;
+                    info!("extended data");
+                    tx.send(String::from_utf8_lossy(data).to_string()).await?;
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
-                    println!("Exited {}", exit_status)
+                    info!("Exited {}", exit_status)
+                }
+                ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped: _,
+                    error_message: _,
+                    lang_tag: _,
+                } => {
+                    info!("Exit signal {:?}", signal_name)
                 }
                 _ => {}
             }

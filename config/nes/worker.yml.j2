@@ -1,0 +1,51 @@
+logLevel: LOG_ERROR
+localWorkerHost: {{ nes_worker_host_ip }}
+coordinatorHost: {{ nes_coordinator_host_ip }}
+#numWorkerThreads: 8
+numberOfBuffersInGlobalBufferManager: 4096
+numberOfBuffersInSourceLocalBufferPool: 1024
+bufferSizeInBytes: 262144
+
+queryCompiler:
+  maxHashTableSize: 4294967296
+  joinStrategy: HASH_JOIN_LOCAL
+  numberOfPartitions: 1000
+  preAllocPageCnt: 32
+  pageSize: 65536
+
+{% if include_source | default(false) | bool %}
+physicalSources:
+    - logicalSourceName: bids
+      physicalSourceName: bids_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {{ nes_source_socket_host_ip }}
+        socketPort: 10000
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: MSG_PACK
+
+    - logicalSourceName: auctions
+      physicalSourceName: auctions_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {{ nes_source_socket_host_ip }}
+        socketPort: 10001
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: MSG_PACK
+
+    - logicalSourceName: persons
+      physicalSourceName: persons_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {{ nes_source_socket_host_ip }}
+        socketPort: 10002
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: MSG_PACK
+{% endif %}
+
+workerId: {{ nes_worker_id }}
+
+# parentId: 1

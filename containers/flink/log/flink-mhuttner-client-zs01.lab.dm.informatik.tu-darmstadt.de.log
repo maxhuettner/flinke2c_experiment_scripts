@@ -1,0 +1,92 @@
+2025-10-05 20:24:47,796 INFO  org.apache.flink.client.cli.CliFrontend                      [] - --------------------------------------------------------------------------------
+2025-10-05 20:24:47,798 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Starting Command Line Client (Version: 1.18-SNAPSHOT, Scala: 2.12, Rev:fb50473, Date:2024-08-30T22:10:37+02:00)
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  OS current user: mhuttner
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Current Hadoop/Kerberos user: <no hadoop dependency found>
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  JVM: OpenJDK 64-Bit Server VM - Eclipse Adoptium - 11/11.0.26+4
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Arch: amd64
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Maximum heap size: 7938 MiBytes
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  JAVA_HOME: /home/mhuttner/.sdkman/candidates/java/current
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  No Hadoop Dependency available
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  JVM Options:
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -XX:+IgnoreUnrecognizedVMOptions
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -verbose:gc
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -XX:NewRatio=3
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -XX:+PrintGCDetails
+2025-10-05 20:24:47,799 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -XX:+PrintGCDateStamps
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -XX:ParallelGCThreads=4
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -Dlog.file=/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/log/flink-mhuttner-client-zs01.lab.dm.informatik.tu-darmstadt.de.log
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -Dlog4j.configuration=file:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/conf/log4j-cli.properties
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -Dlog4j.configurationFile=file:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/conf/log4j-cli.properties
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     -Dlogback.configurationFile=file:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/conf/logback.xml
+2025-10-05 20:24:47,800 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Program Arguments:
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     run
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     flink-test.jar
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --input
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     ../../creditcard.csv
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --sim.recordDelay
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     5000
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --kafka.server
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     172.17.0.1:9092
+2025-10-05 20:24:47,801 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --serverless
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     true
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --updatedOperator
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     false
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --customOperator
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     test
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --tcp.source.port
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     10000
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --tcp.source.host
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     10.10.10.6
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --tcp.sink.port
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     9000
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     --tcp.sink.host
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -     10.10.10.1
+2025-10-05 20:24:47,802 INFO  org.apache.flink.client.cli.CliFrontend                      [] -  Classpath: /home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/commons-codec-1.17.0.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/commons-logging-1.2.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-cep-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-connector-files-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-csv-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-json-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-scala_2.12-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-sql-connector-kafka-3.2.0-1.18.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-streaming-java-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-table-api-java-uber-1.18.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-table-planner-loader-1.18-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-table-runtime-1.18.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/gson-2.10.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/httpclient-4.5.14.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/httpcore-4.4.14.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/lettuce-core-6.1.8.RELEASE.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/log4j-1.2-api-2.17.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/log4j-api-2.17.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/log4j-core-2.17.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/log4j-slf4j-impl-2.17.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/my-flink-udfs.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-buffer-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-codec-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-common-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-handler-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-resolver-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/netty-transport-4.1.108.Final.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/nexmark-flink-0.3-SNAPSHOT.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/reactive-streams-1.0.4.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/reactor-core-3.3.22.RELEASE.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/scala-java8-compat_2.12-1.0.2.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/scala-library-2.12.15.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/scala-reflect-2.12.15.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/stax2-api-4.2.2.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/woodstox-core-7.1.1.jar:/home/mhuttner/flink/flink-dist/target/flink-1.18-SNAPSHOT-bin/flink-1.18-SNAPSHOT/lib/flink-dist-1.18-SNAPSHOT.jar:::
+2025-10-05 20:24:47,803 INFO  org.apache.flink.client.cli.CliFrontend                      [] - --------------------------------------------------------------------------------
+2025-10-05 20:24:47,806 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: env.java.opts.jobmanager, -Xloggc:$FLINK_LOG_DIR/jobmanager-gc.log -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=2 -XX:GCLogFileSize=512M
+2025-10-05 20:24:47,806 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: env.java.opts, -verbose:gc -XX:NewRatio=3 -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:ParallelGCThreads=4
+2025-10-05 20:24:47,806 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: jobmanager.rpc.address, 10.10.10.1
+2025-10-05 20:24:47,806 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: jobmanager.bind-host, 0.0.0.0
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: io.tmp.dirs, /tmp
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: topology.graphml.path, /home/mhuttner/flink/build-target/conf/topo.graphml
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: execution.checkpointing.checkpoints-after-tasks-finish.enabled, false
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: parallelism.default, 1
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: taskmanager.memory.process.size, 8G
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: execution.checkpointing.mode, EXACTLY_ONCE
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: table.exec.mini-batch.size, 50000
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: table.optimizer.distinct-agg.split.enabled, true
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: state.backend.local-recovery, true
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: cluster.placement-method, BOTTOM_UP
+2025-10-05 20:24:47,807 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: state.backend.rocksdb.localdir, /tmp
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: state.backend.incremental, true
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: jobmanager.memory.process.size, 8G
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: jobmanager.rpc.port, 6123
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: rest.bind-address, 0.0.0.0
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: rest.port, 8081
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: execution.checkpointing.interval, 180000
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: table.exec.mini-batch.enabled, true
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: rest.address, 0.0.0.0
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: state.backend, rocksdb
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: env.java.opts.taskmanager, -Xloggc:$FLINK_LOG_DIR/taskmanager-gc.log -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=2 -XX:GCLogFileSize=512M
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: state.checkpoints.dir, file:///mnt/labstore/mhuttner/checkpoint
+2025-10-05 20:24:47,808 INFO  org.apache.flink.configuration.GlobalConfiguration           [] - Loading configuration property: table.exec.mini-batch.allow-latency, 2s
+2025-10-05 20:24:47,839 INFO  org.apache.flink.client.cli.CliFrontend                      [] - Loading FallbackYarnSessionCli
+2025-10-05 20:24:47,863 INFO  org.apache.flink.core.fs.FileSystem                          [] - Hadoop is not in the classpath/dependencies. The extended set of supported File Systems via Hadoop is not available.
+2025-10-05 20:24:47,880 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-graphite
+2025-10-05 20:24:47,886 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-datadog
+2025-10-05 20:24:47,886 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: external-resource-gpu
+2025-10-05 20:24:47,886 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-jmx
+2025-10-05 20:24:47,886 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-statsd
+2025-10-05 20:24:47,887 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-influx
+2025-10-05 20:24:47,887 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-prometheus
+2025-10-05 20:24:47,887 INFO  org.apache.flink.core.plugin.DefaultPluginManager            [] - Plugin loader with ID not found, creating it: metrics-slf4j
+2025-10-05 20:24:47,924 INFO  org.apache.flink.runtime.security.modules.HadoopModuleFactory [] - Cannot create Hadoop Security Module because Hadoop cannot be found in the Classpath.
+2025-10-05 20:24:47,952 INFO  org.apache.flink.runtime.security.modules.JaasModule         [] - Jaas file will be created as /tmp/jaas-2102733399609072706.conf.
+2025-10-05 20:24:47,959 INFO  org.apache.flink.runtime.security.contexts.HadoopSecurityContextFactory [] - Cannot install HadoopSecurityContext because Hadoop cannot be found in the Classpath.
+2025-10-05 20:24:47,960 INFO  org.apache.flink.client.cli.CliFrontend                      [] - Running 'run' command.
+2025-10-05 20:24:47,977 INFO  org.apache.flink.client.cli.CliFrontend                      [] - Building program from JAR file
+2025-10-05 20:24:47,995 INFO  org.apache.flink.client.ClientUtils                          [] - Starting program (detached: false)
+2025-10-05 20:24:48,028 WARN  org.apache.flink.configuration.Configuration                 [] - Config uses deprecated configuration key 'state.backend' instead of proper key 'state.backend.type'
+2025-10-05 20:24:48,045 INFO  org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend [] - Using predefined options: DEFAULT.
+2025-10-05 20:24:48,651 INFO  org.apache.flink.client.program.rest.RestClusterClient       [] - Submitting job 'Streaming CEPLess query' (eb5d30d5cde5e618da19391d9ecd3623).
+2025-10-05 20:24:49,458 INFO  org.apache.flink.client.program.rest.RestClusterClient       [] - Successfully submitted job 'Streaming CEPLess query' (eb5d30d5cde5e618da19391d9ecd3623) to 'http://0.0.0.0:8081'.

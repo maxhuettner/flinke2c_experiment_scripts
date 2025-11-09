@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+    <key id="type" for="node" attr.name="type" attr.type="string"/>
+    <key id="id" for="node" attr.name="id" attr.type="string"/>
+    <key id="compute" for="node" attr.name="computeCapability" attr.type="double"/>
+    <key id="memory" for="node" attr.name="memoryCapability" attr.type="double"/>
+    <key id="slots" for="node" attr.name="slots" attr.type="int"/>
+
+    <graph id="processing-topology" edgedefault="directed">
+        <node id="source1">
+            <data key="type">source</data>
+            <data key="id">Source1</data>
+        </node>
+
+        <node id="node_2">
+            <data key="type">compute</data>
+            <data key="id">10.10.10.2</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">{{ (flink_task_slots | default(1)) | int }}</data>
+        </node>
+
+        <node id="node_3">
+            <data key="type">compute</data>
+            <data key="id">10.10.10.3</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">{{ (flink_task_slots | default(1)) | int }}</data>
+        </node>
+
+        <node id="node_5">
+            <data key="type">compute</data>
+            <data key="id">10.10.10.5</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">{{ (flink_task_slots | default(1)) | int }}</data>
+        </node>
+
+        <node id="node_7">
+            <data key="type">compute</data>
+            <data key="id">10.10.10.7</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">{{ (flink_task_slots | default(1)) | int }}</data>
+        </node>
+
+        <node id="node_8">
+            <data key="type">compute</data>
+            <data key="id">10.10.10.8</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">{{ (flink_task_slots | default(1)) | int }}</data>
+        </node>
+
+        <node id="sink1">
+            <data key="type">sink</data>
+            <data key="id">Sink1</data>
+        </node>
+
+        <edge id="e_source1_node_8" source="source1" target="node_8"/>
+        <edge id="e_node_8_node_7" source="node_8" target="node_7"/>
+        <edge id="e_node_7_node_3" source="node_7" target="node_3"/>
+        <edge id="e_node_7_node_5" source="node_7" target="node_5"/>
+        <edge id="e_node_3_node_2" source="node_3" target="node_2"/>
+        <edge id="e_node_5_node_2" source="node_5" target="node_2"/>
+        <edge id="e_node_2_sink1" source="node_2" target="sink1"/>
+    </graph>
+</graphml>

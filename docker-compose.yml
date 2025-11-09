@@ -1,10 +1,12 @@
 services:
   a:
     build: .
+    # network_mode: host
     ports:
       - "2222:22"
   b:
     build: .
+    # network_mode: host
     ports:
       - "2223:22"
   # client:
