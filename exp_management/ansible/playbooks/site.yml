@@ -1,0 +1,17 @@
+---
+- name: Prepare experiment infrastructure (cloud + on-prem)
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    node_class: "{{ hostvars[inventory_hostname].node_class | default('cloud') }}"
+  pre_tasks:
+    - name: Wait for SSH to become available
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 300
+  roles:
+    - role: common
+    - role: wireguard

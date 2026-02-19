@@ -1,0 +1,17 @@
+[package]
+name = "resource_management"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+aws-config = { version = "1.8.10", features = ["behavior-version-latest"] }
+aws-sdk-ec2 = "1.187.0"
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = "0.10"
+tokio = { workspace = true }
+tracing = { workspace = true }
+x25519-dalek = { version = "2.0", features = ["serde", "static_secrets"] }

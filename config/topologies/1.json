@@ -1,13 +1,37 @@
 {
   "nodes": [
     { "id": "a", "address": "127.0.0.1:2222", "node_type": "Compute", "speed": 1 },
-    { "id": "b", "address": "127.0.0.1:2223", "node_type": "Compute" }
+    { "id": "b", "address": "127.0.0.1:2223", "node_type": "Compute" },
+    { "id": "c", "address": "127.0.0.1:2224", "node_type": "Compute" },
+    { "id": "d", "address": "127.0.0.1:2225", "node_type": "Compute" },
+    { "id": "e", "address": "127.0.0.1:2226", "node_type": "Compute" }
   ],
   "edges": [
     {
       "source": "a",
       "target": "b",
       "weight": { "speed": 100 }
+    },
+    {
+      "source": "a",
+      "target": "c",
+      "weight": { "speed": 50 }
+    },
+    {
+      "source": "b",
+      "target": "d",
+      "weight": { "speed": 75 }
+    },
+    {
+      "source": "c",
+      "target": "d",
+      "weight": { "speed": 25 }
+    },
+    {
+      "source": "d",
+      "target": "e",
+      "weight": { "speed": 100 }
     }
+
   ]
 }

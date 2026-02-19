@@ -1,0 +1,21 @@
+all:
+  children:
+    onprem:
+      hosts:
+        # Example static host. Adapt to your environment.
+        # onprem-router:
+          # ansible_host: 192.0.2.33
+          # ansible_user: labadmin
+          # node_class: onprem
+          # Optional: define WireGuard metadata here so the role configures it.
+          # wireguard:
+          #   interface: wg0
+          #   listen_port: 51820
+          #   private_key: "<YOUR-PRIVATE-KEY>"
+          #   address: 10.42.0.20/32
+          #   peers:
+          #     - name: cloud-node
+          #       public_key: "<PEER-PUBLIC-KEY>"
+          #       endpoint: 3.80.1.23:51820
+          #       allowed_ips:
+          #         - 10.42.0.10/32

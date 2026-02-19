@@ -1,0 +1,40 @@
+- name: Refresh apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install base packages
+  ansible.builtin.package:
+    name: "{{ common_base_packages }}"
+    state: present
+  when: common_base_packages | length > 0
+
+- name: Install Docker engine
+  ansible.builtin.package:
+    name: "{{ docker_package_map.get(ansible_distribution, docker_package_map.get(ansible_os_family, 'docker.io')) }}"
+    state: present
+
+- name: Ensure Docker service is enabled
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Install cloud specific packages
+  ansible.builtin.package:
+    name: "{{ common_cloud_packages }}"
+    state: present
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - common_cloud_packages | length > 0
+
+- name: Install on-prem specific packages
+  ansible.builtin.package:
+    name: "{{ common_onprem_packages }}"
+    state: present
+  when:
+    - node_class is defined
+    - node_class == 'onprem'
+    - common_onprem_packages | length > 0

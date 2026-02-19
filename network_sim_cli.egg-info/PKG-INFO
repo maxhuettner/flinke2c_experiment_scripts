@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: network-sim-cli
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: asyncssh>=2.14
+Requires-Dist: cryptography>=42
+Requires-Dist: networkx>=3.2
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: click>=8.1

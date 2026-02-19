@@ -1,0 +1,25 @@
+---
+# Packages installed on every node
+common_base_packages:
+  - curl
+  - git
+  - python3
+  - python3-pip
+
+# Extra packages per node class (set node_class host var)
+common_cloud_packages:
+  - awscli
+common_onprem_packages: []
+
+docker_package_map:
+  Debian: docker.io
+  Ubuntu: docker.io
+  RedHat: docker
+
+wireguard_package_map:
+  Debian: wireguard
+  Ubuntu: wireguard
+  RedHat: wireguard-tools
+
+wireguard_interface: wg0
+wireguard_default_listen_port: 51820

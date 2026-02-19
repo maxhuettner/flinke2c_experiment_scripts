@@ -1,0 +1,6 @@
+asyncssh>=2.14
+cryptography>=42
+networkx>=3.2
+python-dotenv>=1.0
+pyyaml>=6.0
+click>=8.1

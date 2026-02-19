@@ -1,0 +1,37 @@
+all:
+  children:
+    cloud:
+      hosts:
+        example-ec2-node:
+          ansible_host: 3.80.1.23
+          ansible_user: ubuntu
+          ansible_ssh_private_key_file: ~/.ssh/network-sim.pem
+          node_class: cloud
+          wireguard:
+            interface: wg0
+            listen_port: 51820
+            private_key: "<FILL_ME>"
+            address: 10.42.0.10/32
+            peers:
+              - name: lab-router
+                public_key: "<PEER_PUBLIC_KEY>"
+                endpoint: lab.example.com:51820
+                allowed_ips:
+                  - 10.42.0.20/32
+    onprem:
+      hosts:
+        lab-router:
+          ansible_host: 192.0.2.33
+          ansible_user: labadmin
+          node_class: onprem
+          wireguard:
+            interface: wg0
+            listen_port: 51820
+            private_key: "<FILL_ME>"
+            address: 10.42.0.20/32
+            peers:
+              - name: example-ec2-node
+                public_key: "<PEER_PUBLIC_KEY>"
+                endpoint: 3.80.1.23:51820
+                allowed_ips:
+                  - 10.42.0.10/32
