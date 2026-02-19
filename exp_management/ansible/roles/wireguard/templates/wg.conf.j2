@@ -2,12 +2,6 @@
 PrivateKey = {{ wireguard.private_key }}
 Address = {{ wireguard.address }}
 ListenPort = {{ wireguard.listen_port | default(wireguard_listen_port_default) }}
-# Allow the kernel to forward packets between WireGuard peers (multi-hop routing).
-# net.ipv4.ip_forward is set persistently by the Ansible role; these iptables
-# rules open the FORWARD chain for the wg interface so the kernel doesn't drop
-# packets that need to be relayed to the next hop.
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
-PreDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
 
 {% if wireguard.dns is defined -%}
 DNS = {{ wireguard.dns if wireguard.dns is string else wireguard.dns | join(',') }}

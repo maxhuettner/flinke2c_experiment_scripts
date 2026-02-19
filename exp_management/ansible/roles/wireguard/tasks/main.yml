@@ -56,3 +56,22 @@
         name: "wg-quick@{{ wireguard.interface | default(wireguard_interface_default) }}"
         enabled: true
         state: started
+
+    # -----------------------------------------------------------------------
+    # FORWARD chain rules — managed by Ansible rather than wg-quick PostUp so
+    # that iptables is not called from inside the service start, which blocks
+    # indefinitely on fresh Ubuntu 22.04 (netfilter module init races).
+    # -----------------------------------------------------------------------
+    - name: Allow forwarding through WireGuard interface (inbound)
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ wireguard.interface | default(wireguard_interface_default) }}"
+        jump: ACCEPT
+        state: present
+
+    - name: Allow forwarding through WireGuard interface (outbound)
+      ansible.builtin.iptables:
+        chain: FORWARD
+        out_interface: "{{ wireguard.interface | default(wireguard_interface_default) }}"
+        jump: ACCEPT
+        state: present
