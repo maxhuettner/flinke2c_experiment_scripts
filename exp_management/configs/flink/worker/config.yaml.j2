@@ -1,0 +1,54 @@
+env:
+  java:
+    opts:
+      all: >-
+        --add-exports=java.base/sun.net.util=ALL-UNNAMED
+        --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED
+        --add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.net=ALL-UNNAMED
+        --add-opens=java.base/java.io=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+        --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+        --add-opens=java.base/java.text=ALL-UNNAMED
+        --add-opens=java.base/java.time=ALL-UNNAMED
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+
+jobmanager:
+  rpc:
+    address: {{ flink_jobmanager_rpc_address }}
+    port: 6123
+
+taskmanager:
+  bind-host: 0.0.0.0
+  host: {{ flink_taskmanager_host }}
+  numberOfTaskSlots: {{ flink_task_slots }}
+  memory:
+    process:
+      size: 1728m
+
+parallelism:
+  default: 1
+
+rest:
+  address: 0.0.0.0
+  bind-address: 0.0.0.0
+  port: 8081
+
+web:
+  submit:
+    enable: false
+  cancel:
+    enable: false
+
+high-availability:
+  type: NONE

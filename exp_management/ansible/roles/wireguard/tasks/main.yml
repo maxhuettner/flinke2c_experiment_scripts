@@ -2,16 +2,16 @@
 - name: Skip WireGuard configuration when metadata is missing
   ansible.builtin.debug:
     msg: "WireGuard metadata not provided for {{ inventory_hostname }}, skipping."
-  when: wireguard is not defined
+  when: wireguard_interfaces is not defined
   tags: ['wireguard']
 
 - name: Configure WireGuard
-  when: wireguard is defined
+  when: wireguard_interfaces is defined
   tags: ['wireguard']
   block:
     - name: Install WireGuard packages
       ansible.builtin.package:
-        name: "{{ wireguard_package_map.get(ansible_distribution, wireguard_package_map.get(ansible_os_family, 'wireguard')) }}"
+        name: "{{ wireguard_package_map.get(ansible_facts['distribution'], wireguard_package_map.get(ansible_facts['os_family'], 'wireguard')) }}"
         state: present
 
     # -----------------------------------------------------------------------
@@ -20,16 +20,20 @@
     # Without this the kernel drops any packet whose destination is not the
     # node's own WireGuard address, silently breaking all multi-hop paths.
     # -----------------------------------------------------------------------
-    - name: Enable IPv4 forwarding (persistent via sysctl.d)
+    - name: Enable IPv4 forwarding and L4 ECMP hashing (persistent via sysctl.d)
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-wireguard-forward.conf
-        content: "net.ipv4.ip_forward = 1\n"
+        content: |
+          net.ipv4.ip_forward = 1
+          # Use L4 (src/dst IP + port + proto) for ECMP nexthop selection so
+          # different flows between the same pair of nodes can take different paths.
+          net.ipv4.fib_multipath_hash_policy = 1
         owner: root
         group: root
         mode: "0644"
       register: _sysctl_file
 
-    - name: Apply IPv4 forwarding sysctl
+    - name: Apply sysctl settings
       ansible.builtin.command: sysctl -p /etc/sysctl.d/99-wireguard-forward.conf
       when: _sysctl_file is changed
       changed_when: true
@@ -42,20 +46,92 @@
         group: root
         mode: "0750"
 
-    - name: Render WireGuard configuration
+    # -----------------------------------------------------------------------
+    # Per-neighbor WireGuard interfaces (one per direct graph edge).
+    # Each interface has exactly one peer — the direct neighbor — and carries
+    # AllowedIPs for all destinations reachable via that neighbor.
+    # -----------------------------------------------------------------------
+    - name: Render WireGuard configurations
       ansible.builtin.template:
         src: wg.conf.j2
-        dest: "/etc/wireguard/{{ wireguard.interface | default(wireguard_interface_default) }}.conf"
+        dest: "/etc/wireguard/{{ iface.interface }}.conf"
         owner: root
         group: root
         mode: "0600"
-      notify: Restart WireGuard
+      loop: "{{ wireguard_interfaces }}"
+      loop_control:
+        loop_var: iface
+      notify:
+        - Restart WireGuard
+        - Restart ECMP routes
 
-    - name: Enable WireGuard service
+    # -----------------------------------------------------------------------
+    # Clean up the legacy single-interface wg0 setup (left over from a
+    # previous deployment).  The new ECMP layout uses one wg_{neighbor}
+    # interface per direct graph edge.  wg0 listens on port 51820, which
+    # the first new interface also needs, so it must be stopped first.
+    # -----------------------------------------------------------------------
+    - name: Stop legacy wg0 service
       ansible.builtin.service:
-        name: "wg-quick@{{ wireguard.interface | default(wireguard_interface_default) }}"
+        name: wg-quick@wg0
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Remove legacy wg0 configuration
+      ansible.builtin.file:
+        path: /etc/wireguard/wg0.conf
+        state: absent
+
+    - name: Clear failed service state so systemd will attempt a fresh start
+      ansible.builtin.command: >
+        systemctl reset-failed wg-quick@{{ iface.interface }}
+      failed_when: false
+      changed_when: false
+      loop: "{{ wireguard_interfaces }}"
+      loop_control:
+        loop_var: iface
+
+    - name: Enable WireGuard services
+      ansible.builtin.service:
+        name: "wg-quick@{{ iface.interface }}"
         enabled: true
         state: started
+      loop: "{{ wireguard_interfaces }}"
+      loop_control:
+        loop_var: iface
+
+    # -----------------------------------------------------------------------
+    # ECMP routes — destinations with multiple equal-cost next-hops get a
+    # multi-nexthop kernel route applied by a oneshot systemd service that
+    # runs after all wg-quick interfaces are up.
+    # -----------------------------------------------------------------------
+    - name: Install ECMP routes script
+      ansible.builtin.template:
+        src: ecmp-routes.sh.j2
+        dest: /etc/wireguard/apply-ecmp-routes.sh
+        owner: root
+        group: root
+        mode: "0755"
+      when: wireguard_ecmp_routes | default([]) | length > 0
+      notify: Restart ECMP routes
+
+    - name: Install ECMP routes systemd service
+      ansible.builtin.template:
+        src: ecmp-routes.service.j2
+        dest: /etc/systemd/system/wg-ecmp-routes.service
+        owner: root
+        group: root
+        mode: "0644"
+      when: wireguard_ecmp_routes | default([]) | length > 0
+      notify: Restart ECMP routes
+
+    - name: Enable and start ECMP routes service
+      ansible.builtin.service:
+        name: wg-ecmp-routes
+        enabled: true
+        state: started
+      when: wireguard_ecmp_routes | default([]) | length > 0
 
     # -----------------------------------------------------------------------
     # FORWARD chain rules — managed by Ansible rather than wg-quick PostUp so
@@ -65,13 +141,19 @@
     - name: Allow forwarding through WireGuard interface (inbound)
       ansible.builtin.iptables:
         chain: FORWARD
-        in_interface: "{{ wireguard.interface | default(wireguard_interface_default) }}"
+        in_interface: "{{ iface.interface }}"
         jump: ACCEPT
         state: present
+      loop: "{{ wireguard_interfaces }}"
+      loop_control:
+        loop_var: iface
 
     - name: Allow forwarding through WireGuard interface (outbound)
       ansible.builtin.iptables:
         chain: FORWARD
-        out_interface: "{{ wireguard.interface | default(wireguard_interface_default) }}"
+        out_interface: "{{ iface.interface }}"
         jump: ACCEPT
         state: present
+      loop: "{{ wireguard_interfaces }}"
+      loop_control:
+        loop_var: iface

@@ -1,0 +1,14 @@
+[Unit]
+Description=WireGuard ECMP Routes
+# Must start after every wg-quick interface so the nexthop devices are present.
+# PartOf= ensures this service is restarted whenever any wg-quick interface restarts.
+After=network.target {% for iface in wireguard_interfaces %}wg-quick@{{ iface.interface }}.service {% endfor %}
+PartOf={% for iface in wireguard_interfaces %}wg-quick@{{ iface.interface }}.service {% endfor %}
+
+[Service]
+Type=oneshot
+ExecStart=/etc/wireguard/apply-ecmp-routes.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

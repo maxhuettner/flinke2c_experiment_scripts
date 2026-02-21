@@ -16,6 +16,17 @@ docker_package_map:
   Ubuntu: docker.io
   RedHat: docker
 
+docker_images_by_node_type:
+  source:
+    - maxhue/tcp-streaming
+  sink:
+    - maxhue/tcp-streaming
+    - maxhue/nes-coordinator
+    - maxhue/flinke2c
+  compute:
+    - maxhue/flinke2c
+    - maxhue/nes-worker
+
 wireguard_package_map:
   Debian: wireguard
   Ubuntu: wireguard

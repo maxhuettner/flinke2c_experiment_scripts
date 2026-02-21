@@ -97,6 +97,33 @@ def _compute_next_hops(
     return tables
 
 
+def _compute_all_nexthops(
+    graph: nx.Graph,
+    participants: list[str],
+) -> dict[str, dict[str, list[str]]]:
+    """Return {source: {destination: [nexthop, ...]}} with all ECMP next-hops.
+
+    Uses nx.all_shortest_paths so that destinations with multiple equal-cost
+    paths contribute multiple next-hops, enabling kernel ECMP routes.
+    """
+    sub = graph.subgraph(participants)
+    tables: dict[str, dict[str, list[str]]] = {}
+    for src in participants:
+        routes: dict[str, list[str]] = {}
+        for dest in participants:
+            if dest == src:
+                continue
+            try:
+                paths = list(nx.all_shortest_paths(sub, src, dest))
+            except nx.NetworkXNoPath:
+                continue
+            nexthops = sorted({p[1] for p in paths if len(p) >= 2})
+            if nexthops:
+                routes[dest] = nexthops
+        tables[src] = routes
+    return tables
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -164,6 +191,145 @@ def build_wireguard_config(
             "address": address_map[src],
             "endpoint": f"{host_public_ips[src]}:{listen_port}",
             "peers": peers,
+        }
+
+    return result
+
+
+def build_wireguard_ecmp_config(
+    graph: nx.Graph,
+    host_public_ips: dict[str, str],
+    node_ids: Optional[list[str]] = None,
+    listen_port: int = DEFAULT_LISTEN_PORT,
+    salt: str = DEFAULT_KEY_SALT,
+    route_address_map: Optional[dict[str, str]] = None,
+    interface_address_map: Optional[dict[str, str]] = None,
+) -> dict[str, dict]:
+    """Return per-node ECMP WireGuard config with one interface per direct neighbor.
+
+    Each node gets a dict with:
+      wireguard_interfaces  – list of per-neighbor wg interface configs
+      wireguard_ecmp_routes – list of ``ip route replace … nexthop …`` commands
+
+    One WireGuard interface is created per direct graph-neighbor (named
+    ``wg_{neighbor}``).  AllowedIPs on each interface covers all destinations
+    reachable via that neighbor.  Exclusively-via-one-interface destinations get
+    a direct ``ip route replace`` in PostUp; destinations with multiple equal-cost
+    next-hops get a multi-nexthop ECMP route installed by a separate service.
+
+    Port assignment
+    ---------------
+    Each undirected edge in the graph gets a unique UDP port starting at
+    ``listen_port``.  Edges are sorted by ``(min(u,v), max(u,v))`` for a stable
+    assignment, so both endpoints of an edge use the same port.
+
+    Key generation
+    --------------
+    Each edge-endpoint gets its own keypair derived from
+    ``edge_{min}_{max}_{node}`` so that per-interface keys are independent.
+    """
+    participants = sorted(
+        nid for nid in (node_ids or list(graph.nodes())) if nid in host_public_ips
+    )
+    sub = graph.subgraph(participants)
+
+    # Routed destination addresses (AllowedIPs / ip route targets).
+    if route_address_map is None:
+        route_map = {
+            nid: f"{graph.nodes[nid]['data'].address}/32"
+            for nid in participants
+        }
+    else:
+        route_map = {
+            nid: route_address_map.get(nid, graph.nodes[nid]["data"].address)
+            for nid in participants
+        }
+        route_map = {
+            nid: ip if "/" in ip else f"{ip}/32"
+            for nid, ip in route_map.items()
+        }
+
+    # Interface addresses can differ from routed destination addresses to avoid
+    # conflicts with existing host NIC IPs (for example EC2 private IPs).
+    if interface_address_map is None:
+        iface_map = route_map
+    else:
+        iface_map = {
+            nid: interface_address_map.get(nid, route_map[nid])
+            for nid in participants
+        }
+        iface_map = {
+            nid: ip if "/" in ip else f"{ip}/32"
+            for nid, ip in iface_map.items()
+        }
+
+    # One port per undirected edge, sorted for stable assignment.
+    edges = sorted({(min(u, v), max(u, v)) for u, v in sub.edges()})
+    edge_ports = {edge: listen_port + i for i, edge in enumerate(edges)}
+
+    # One keypair per edge-endpoint: (edge, node) → (priv_b64, pub_b64).
+    edge_keys: dict[tuple[str, str], dict[str, tuple[str, str]]] = {}
+    for (u, v) in edges:
+        edge_keys[(u, v)] = {
+            u: _generate_keypair(f"edge_{u}_{v}_{u}", salt),
+            v: _generate_keypair(f"edge_{u}_{v}_{v}", salt),
+        }
+
+    all_nexthops = _compute_all_nexthops(graph, participants)
+
+    result: dict[str, dict] = {}
+    for src in participants:
+        routes = all_nexthops.get(src, {})
+        direct_neighbors = sorted(sub.neighbors(src))
+
+        interfaces = []
+        for nbr in direct_neighbors:
+            edge_key = (min(src, nbr), max(src, nbr))
+            port = edge_ports[edge_key]
+            iface_name = f"wg_{nbr}"
+
+            nbr_route_ip = route_map[nbr].split("/")[0] + "/32"
+
+            # AllowedIPs: neighbor's own WG IP + every dest where nbr is a valid nexthop.
+            allowed: set[str] = {nbr_route_ip}
+            for dest, nexthops in routes.items():
+                if nbr in nexthops:
+                    allowed.add(route_map[dest].split("/")[0] + "/32")
+
+            # Direct routes for PostUp: neighbor's own IP + dests exclusively via this nbr.
+            direct: list[str] = [nbr_route_ip]
+            for dest, nexthops in sorted(routes.items()):
+                if nexthops == [nbr]:
+                    dest_ip = route_map[dest].split("/")[0] + "/32"
+                    if dest_ip != nbr_route_ip:
+                        direct.append(dest_ip)
+
+            interfaces.append({
+                "interface": iface_name,
+                "listen_port": port,
+                "private_key": edge_keys[edge_key][src][0],
+                "address": iface_map[src],
+                "speed": sub[src][nbr].get("speed"),
+                "peers": [{
+                    "public_key": edge_keys[edge_key][nbr][1],
+                    "endpoint": f"{host_public_ips[nbr]}:{port}",
+                    "allowed_ips": sorted(allowed),
+                    "persistent_keepalive": 25,
+                    "direct_routes": sorted(direct),
+                }],
+            })
+
+        # ECMP routes: destinations reached via more than one equal-cost next-hop.
+        ecmp_routes: list[str] = []
+        for dest, nexthops in sorted(routes.items()):
+            if len(nexthops) > 1:
+                nexthop_args = " ".join(f"nexthop dev wg_{nh}" for nh in nexthops)
+                dest_ip = route_map[dest].split("/")[0] + "/32"
+                ecmp_routes.append(f"ip route replace {dest_ip} {nexthop_args}")
+
+        result[src] = {
+            "wireguard_interfaces": interfaces,
+            "wireguard_ecmp_routes": ecmp_routes,
         }
 
     return result

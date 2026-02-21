@@ -1,5 +1,19 @@
 ---
+# With Table=off, wg-quick down/up never calls iptables-restore, so restarting
+# all interfaces completes quickly without hanging.
 - name: Restart WireGuard
   ansible.builtin.service:
-    name: "wg-quick@{{ wireguard_interface_default }}"
+    name: "wg-quick@{{ iface.interface }}"
     state: restarted
+  loop: "{{ wireguard_interfaces | default([]) }}"
+  loop_control:
+    loop_var: iface
+  when: wireguard_interfaces is defined
+
+# Runs after Restart WireGuard (definition order) so that the nexthop devices
+# are present before the ECMP ip-route commands execute.
+- name: Restart ECMP routes
+  ansible.builtin.service:
+    name: wg-ecmp-routes
+    state: restarted
+  when: wireguard_ecmp_routes | default([]) | length > 0

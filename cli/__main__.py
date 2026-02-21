@@ -2,10 +2,13 @@
 
 Usage (after `pip install -e .`):
 
-    sim setup   -f config/topologies/1.json
-    sim destroy -f config/topologies/1.json
-    sim run     -f config/topologies/1.json -c "uname -a"
-    sim run     -f config/topologies/1.json -c "ping -c3 10.10.10.3" -n a -n b
+    sim setup      -f config/topologies/1.json
+    sim destroy    -f config/topologies/1.json
+    sim run        -f config/topologies/1.json -c "uname -a"
+    sim run        -f config/topologies/1.json -c "ping -c3 10.10.10.3" -n a -n b
+    sim experiment -f config/topologies/edge-to-cloud.json \\
+                   -e exp_management/experiments.yml \\
+                   [-o results/] [--skip-data-upload]
 
 Environment variables (can be placed in .env):
     SSH_KEY_PATH            Private key for SSH/Ansible (default: ~/.ssh/id_ed25519)
@@ -112,7 +115,10 @@ def _prepare_tfvars(topology_file: str) -> None:
     graph = load_topology(topology_file)
     ssh_public_key = _load_ssh_public_key()
     aws_region = os.environ.get("AWS_REGION", "eu-central-1")
-    tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    try:
+        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
 
@@ -136,7 +142,10 @@ def setup(topology_file: str) -> None:
     aws_region = os.environ.get("AWS_REGION", "eu-central-1")
 
     # 1. Generate and write Terraform variables.
-    tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    try:
+        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
 
@@ -182,7 +191,10 @@ def destroy(topology_file: str) -> None:
     ssh_public_key = _load_ssh_public_key()
     aws_region = os.environ.get("AWS_REGION", "eu-central-1")
 
-    tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    try:
+        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
 
@@ -269,10 +281,14 @@ def run_cmd(topology_file: str, command: str, nodes: tuple[str, ...]) -> None:
             for i, t in enumerate(targets)
         ]
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
-        return {
-            t["id"]: (res if isinstance(res, int) else 1)
-            for t, res in zip(targets, results_list)
-        }
+        out = {}
+        for t, res in zip(targets, results_list):
+            if isinstance(res, int):
+                out[t["id"]] = res
+            else:
+                print(f"[{t['id']}] unhandled error: {res!r}", file=sys.stderr)
+                out[t["id"]] = 1
+        return out
 
     results = asyncio.run(_run_all())
 
@@ -280,6 +296,71 @@ def run_cmd(topology_file: str, command: str, nodes: tuple[str, ...]) -> None:
     if failed:
         print(f"\nFailed on: {', '.join(failed)}", file=sys.stderr)
         sys.exit(1)
+
+
+@main.command("experiment")
+@click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
+@click.option(
+    "-e", "--experiments-file", required=True,
+    help="Path to experiments YAML (see exp_management/experiments.example.yml)",
+)
+@click.option(
+    "-o", "--output-dir", default="results", show_default=True,
+    help="Local directory where downloaded logs are saved",
+)
+@click.option(
+    "--skip-data-upload", is_flag=True,
+    help="Skip uploading source data files (already present on remote node)",
+)
+def experiment_cmd(
+    topology_file: str,
+    experiments_file: str,
+    output_dir: str,
+    skip_data_upload: bool,
+) -> None:
+    """Run a batch of streaming experiments on the provisioned nodes.
+
+    Reads the experiment list from EXPERIMENTS_FILE and for each experiment:
+    starts TCP sources + sink and a Flink cluster on the topology's source node,
+    runs the SQL query for the requested number of repetitions, then downloads
+    the logs to OUTPUT_DIR/<experiment-name>/.
+
+    Source data files in exp_management/source_data/ are uploaded to the remote
+    ~/data/ directory before the first experiment (pass --skip-data-upload if
+    they are already present).
+    """
+    from cli.experiment import load_experiments, run_experiments
+
+    ssh_key = _load_ssh_key_path()
+    if not ssh_key:
+        raise click.ClickException(
+            "No SSH key found. Set SSH_KEY_PATH (or ANSIBLE_SSH_KEY_PATH) in .env."
+        )
+    passphrase = os.environ.get("SSH_KEY_PASSPHRASE")
+
+    try:
+        experiments = load_experiments(experiments_file)
+    except (FileNotFoundError, KeyError, yaml.YAMLError) as exc:
+        raise click.ClickException(f"Failed to load experiments file: {exc}") from exc
+
+    if not experiments:
+        raise click.ClickException("No experiments defined in the experiments file.")
+
+    print(f"Loaded {len(experiments)} experiment(s) from {experiments_file}")
+
+    try:
+        asyncio.run(
+            run_experiments(
+                experiments=experiments,
+                topology_file=topology_file,
+                output_base=Path(output_dir),
+                key_path=ssh_key,
+                passphrase=passphrase,
+                skip_data_upload=skip_data_upload,
+            )
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

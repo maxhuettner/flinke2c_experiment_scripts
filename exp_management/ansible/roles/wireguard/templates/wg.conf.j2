@@ -1,17 +1,36 @@
 [Interface]
-PrivateKey = {{ wireguard.private_key }}
-Address = {{ wireguard.address }}
-ListenPort = {{ wireguard.listen_port | default(wireguard_listen_port_default) }}
+PrivateKey = {{ iface.private_key }}
+Address = {{ iface.address }}
+ListenPort = {{ iface.listen_port }}
+# Table=off: disable wg-quick's iptables/fwmark management entirely.
+# It calls iptables-restore internally even without PostUp hooks, which hangs
+# on fresh Ubuntu 22.04 EC2 instances.  Routes are managed via ip-route below.
+Table = off
+{% set up_cmds = [] %}
+{% set dn_cmds = [] %}
+{% for peer in iface.peers | default([]) %}
+{% for ip in peer.direct_routes | default([]) %}
+{% if up_cmds.append('ip route replace ' + ip + ' dev %i') %}{% endif %}
+{% if dn_cmds.append('ip route del ' + ip + ' dev %i || true') %}{% endif %}
+{% endfor %}
+{% endfor %}
+{% if iface.speed %}
+{% if up_cmds.append('tc qdisc replace dev %i root tbf rate ' + iface.speed|string + 'mbit burst 64kb latency 50ms') %}{% endif %}
+{% endif %}
+{% if up_cmds %}
+PostUp  = {{ up_cmds | join('; ') }}
+PreDown = {{ dn_cmds | join('; ') }}
+{% endif %}
 
-{% if wireguard.dns is defined -%}
-DNS = {{ wireguard.dns if wireguard.dns is string else wireguard.dns | join(',') }}
-{% endif -%}
-
-{% for peer in wireguard.peers | default([]) %}
+{% for peer in iface.peers | default([]) %}
 [Peer]
 PublicKey = {{ peer.public_key }}
 AllowedIPs = {{ peer.allowed_ips if peer.allowed_ips is string else peer.allowed_ips | join(', ') }}
-{% if peer.endpoint is defined %}Endpoint = {{ peer.endpoint }}{% endif %}
-{% if peer.persistent_keepalive is defined %}PersistentKeepalive = {{ peer.persistent_keepalive }}{% endif %}
+{% if peer.endpoint is defined %}
+Endpoint = {{ peer.endpoint }}
+{% endif %}
+{% if peer.persistent_keepalive is defined %}
+PersistentKeepalive = {{ peer.persistent_keepalive }}
+{% endif %}
 
 {% endfor %}

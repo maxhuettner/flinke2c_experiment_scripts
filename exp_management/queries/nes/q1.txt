@@ -1,0 +1,1 @@
+Query::from("bids").map(Attribute("price") = Attribute("price") * 0.908).sink(TcpSinkDescriptor::create("10.10.0.10", 9000));

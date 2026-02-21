@@ -2,11 +2,20 @@ all:
   children:
     onprem:
       hosts:
+        - zs01
+        - zs02
+        - zs03
+        - zs04
+        - zs05
+        - zs06
+        - zs07
+        - zs08
         # Example static host. Adapt to your environment.
         # onprem-router:
           # ansible_host: 192.0.2.33
           # ansible_user: labadmin
           # node_class: onprem
+          # node_type: compute
           # Optional: define WireGuard metadata here so the role configures it.
           # wireguard:
           #   interface: wg0

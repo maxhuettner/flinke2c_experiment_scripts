@@ -2,7 +2,8 @@
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
-  when: ansible_os_family == "Debian"
+    lock_timeout: 300
+  when: ansible_facts["os_family"] == "Debian"
 
 - name: Install base packages
   ansible.builtin.package:
@@ -12,14 +13,66 @@
 
 - name: Install Docker engine
   ansible.builtin.package:
-    name: "{{ docker_package_map.get(ansible_distribution, docker_package_map.get(ansible_os_family, 'docker.io')) }}"
+    name: "{{ docker_package_map.get(ansible_facts['distribution'], docker_package_map.get(ansible_facts['os_family'], 'docker.io')) }}"
     state: present
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
 
-- name: Ensure Docker service is enabled
+- name: Check Docker CLI availability
+  ansible.builtin.command: docker --version
+  register: docker_check
+  failed_when: false
+  changed_when: false
+
+- name: Ensure Docker service is enabled when Docker is present
   ansible.builtin.service:
     name: docker
     state: started
     enabled: true
+  when: docker_check.rc == 0
+
+- name: Add ansible user to docker group
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+  when: docker_check.rc == 0
+
+- name: Resolve node-specific Docker images to pre-pull
+  ansible.builtin.set_fact:
+    docker_images_to_pull: >-
+      {{
+        docker_images_by_node_type.get(
+          (hostvars[inventory_hostname].node_type | default('') | lower),
+          []
+        ) | unique
+      }}
+
+- name: Fail when Docker images are requested but Docker is unavailable
+  ansible.builtin.fail:
+    msg: >-
+      Docker is required on {{ inventory_hostname }} (node_type={{ hostvars[inventory_hostname].node_type | default('unknown') }})
+      to pre-pull images {{ docker_images_to_pull }}, but 'docker' CLI is not available.
+      For on-prem nodes, install Docker manually or set node_type to skip image pulls.
+  when:
+    - docker_images_to_pull | length > 0
+    - docker_check.rc != 0
+
+- name: Prune unused Docker objects to free disk space before pulling
+  ansible.builtin.command: docker system prune -f
+  when:
+    - docker_images_to_pull | length > 0
+    - docker_check.rc == 0
+
+- name: Pre-pull node-specific Docker images
+  ansible.builtin.command: "docker pull {{ image }}"
+  loop: "{{ docker_images_to_pull }}"
+  loop_control:
+    loop_var: image
+  when:
+    - docker_images_to_pull | length > 0
+    - docker_check.rc == 0
 
 - name: Install cloud specific packages
   ansible.builtin.package:

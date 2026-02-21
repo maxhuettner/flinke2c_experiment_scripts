@@ -1,0 +1,61 @@
+# Example experiment batch definition for `sim experiment`.
+#
+# Usage:
+#   sim experiment \
+#     -f config/topologies/edge-to-cloud.json \
+#     -e exp_management/experiments.example.yml \
+#     -o results/
+#
+# Fields per experiment:
+#   name              - identifier; also used as the log output subdirectory
+#   system            - streaming system to use (currently only "flink")
+#   query             - query name, resolves to exp_management/queries/flink/<name>.sql
+#   repetitions       - how many times to run the query (default: 1)
+#   placement_method  - "" (default) or e.g. "TOP_DOWN" (enables topology-aware placement)
+#   graphml_file      - graphml filename in exp_management/configs/flink/coordinator/
+#                       (optional; defaults to <topology-stem>.graphml when placement_method is set)
+#   num_task_slots    - override the task slot count from query_config.yml (optional)
+#
+# Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
+# exp_management/configs/flink/query_config.yml and can be overridden here.
+
+experiments:
+  - name: flink_q1_cloud
+    system: flink
+    query: q1
+    repetitions: 5
+
+  - name: flink_q4_cloud
+    system: flink
+    query: q4
+    repetitions: 5
+    num_task_slots: 3
+
+  - name: flink_q5_cloud
+    system: flink
+    query: q5
+    repetitions: 5
+    
+  - name: flinke2c_td_q1_cloud
+    system: flink
+    query: q1
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+
+  - name: flinke2c_td_q4_cloud
+    system: flink
+    query: q4
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+    num_task_slots: 3
+
+  - name: flinke2c_td_q5_cloud
+    system: flink
+    query: q5
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+    num_task_slots: 3
+    

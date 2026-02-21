@@ -17,6 +17,26 @@ data "aws_ami" "ubuntu_jammy" {
   }
 }
 
+data "aws_ami" "ubuntu_jammy_arm64" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-arm64-server-*"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+}
+
+data "aws_ec2_instance_type" "selected" {
+  for_each      = local.instance_definitions
+  instance_type = each.value.instance_type
+}
+
 resource "aws_key_pair" "generated" {
   count      = var.ssh_public_key == "" ? 0 : 1
   key_name   = var.ssh_key_pair_name
@@ -78,6 +98,15 @@ resource "aws_security_group" "experiment" {
   vpc_id      = aws_vpc.experiments.id
 }
 
+resource "aws_security_group_rule" "intra_cluster_ingress" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.experiment.id
+  protocol                 = "-1"
+  from_port                = 0
+  to_port                  = 0
+  source_security_group_id = aws_security_group.experiment.id
+}
+
 resource "aws_security_group_rule" "ssh_ingress" {
   for_each          = toset(var.ssh_ingress_cidrs)
   type              = "ingress"
@@ -111,9 +140,15 @@ resource "aws_security_group_rule" "egress_all" {
 resource "aws_instance" "nodes" {
   for_each = local.instance_definitions
 
-  ami                         = coalesce(each.value.ami, data.aws_ami.ubuntu_jammy.id)
-  instance_type               = each.value.instance_type
-  subnet_id = each.value.subnet_id == null ? aws_subnet.public.id : each.value.subnet_id
+  ami = coalesce(
+    each.value.ami,
+    contains(data.aws_ec2_instance_type.selected[each.key].supported_architectures, "arm64") ?
+    data.aws_ami.ubuntu_jammy_arm64.id :
+    data.aws_ami.ubuntu_jammy.id
+  )
+  instance_type = each.value.instance_type
+  private_ip    = each.value.private_ip
+  subnet_id     = each.value.subnet_id == null ? aws_subnet.public.id : each.value.subnet_id
   key_name = (
     each.value.key_name != null ? each.value.key_name :
     length(aws_key_pair.generated) > 0 ? aws_key_pair.generated[0].key_name : var.ssh_key_name
@@ -139,6 +174,12 @@ resource "aws_instance" "nodes" {
     },
     lookup(each.value, "tags", {})
   )
+
+  root_block_device {
+    volume_size           = var.root_volume_size_gb
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
 
   metadata_options {
     http_endpoint = "enabled"

@@ -1,36 +1,31 @@
 {
   "nodes": [
-    { "id": "a", "address": "127.0.0.1:2222", "node_type": "Compute", "speed": 1 },
-    { "id": "b", "address": "127.0.0.1:2223", "node_type": "Compute" },
-    { "id": "c", "address": "127.0.0.1:2224", "node_type": "Compute" },
-    { "id": "d", "address": "127.0.0.1:2225", "node_type": "Compute" },
-    { "id": "e", "address": "127.0.0.1:2226", "node_type": "Compute" }
+    { "id": "a", "address": "10.10.0.10", "node_type": "sink", "speed": 1 },
+    { "id": "b", "address": "10.10.0.11", "node_type": "compute" },
+    { "id": "c", "address": "10.10.0.12", "node_type": "compute" },
+    { "id": "d", "address": "10.10.0.13", "node_type": "compute" },
+    { "id": "e", "address": "10.10.0.14", "node_type": "source" }
   ],
   "edges": [
     {
       "source": "a",
-      "target": "b",
-      "weight": { "speed": 100 }
+      "target": "b"
     },
     {
       "source": "a",
-      "target": "c",
-      "weight": { "speed": 50 }
+      "target": "c"
     },
     {
       "source": "b",
-      "target": "d",
-      "weight": { "speed": 75 }
+      "target": "d"
     },
     {
       "source": "c",
-      "target": "d",
-      "weight": { "speed": 25 }
+      "target": "d"
     },
     {
       "source": "d",
-      "target": "e",
-      "weight": { "speed": 100 }
+      "target": "e"
     }
 
   ]

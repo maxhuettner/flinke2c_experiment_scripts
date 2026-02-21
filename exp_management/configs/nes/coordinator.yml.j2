@@ -1,0 +1,57 @@
+logLevel: LOG_ERROR
+
+restIp: 127.0.0.1
+coordinatorHost: {{ nes_coordinator_host_ip }}
+restPort: 8081
+
+worker:
+  localWorkerHost: {{ nes_coordinator_host_ip }}
+  coordinatorHost: {{ nes_coordinator_host_ip }}
+  numberOfBuffersInGlobalBufferManager: 4096
+  numberOfBuffersInSourceLocalBufferPool: 1024
+  bufferSizeInBytes: 262144
+
+  queryCompiler:
+    maxHashTableSize: 4294967296
+    joinStrategy: HASH_JOIN_LOCAL
+    numberOfPartitions: 1000
+    preAllocPageCnt: 32
+    pageSize: 65536
+
+  workerId: 1
+
+logicalSources:
+  - logicalSourceName: bids
+    fields:
+      - name: auction
+        type: INT64
+      - name: bidder
+        type: INT64
+      - name: price
+        type: FLOAT64
+      - name: dateTime
+        type: INT64
+
+  - logicalSourceName: persons
+    fields:
+      - name: id
+        type: INT64
+      - name: dateTime
+        type: INT64
+
+  - logicalSourceName: auctions
+    fields:
+      - name: id
+        type: INT64
+      - name: initialBid
+        type: INT64
+      - name: reserve
+        type: INT64
+      - name: dateTime
+        type: INT64
+      - name: expires
+        type: INT64
+      - name: seller
+        type: INT64
+      - name: category
+        type: INT64

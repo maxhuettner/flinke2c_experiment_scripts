@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+    <key id="type"    for="node" attr.name="type"              attr.type="string"/>
+    <key id="id"      for="node" attr.name="id"                attr.type="string"/>
+    <key id="compute" for="node" attr.name="computeCapability" attr.type="double"/>
+    <key id="memory"  for="node" attr.name="memoryCapability"  attr.type="double"/>
+    <key id="slots"   for="node" attr.name="slots"             attr.type="int"/>
+
+    <graph id="processing-topology" edgedefault="directed">
+        <node id="a">
+            <data key="type">sink</data>
+            <data key="id">Sink1</data>
+        </node>
+
+        <node id="b">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.11</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="c">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.12</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="d">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.13</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="e">
+            <data key="type">source</data>
+            <data key="id">Source1</data>
+        </node>
+
+        <edge id="b_a" source="b" target="a"/>
+        <edge id="c_a" source="c" target="a"/>
+        <edge id="d_b" source="d" target="b"/>
+        <edge id="d_c" source="d" target="c"/>
+        <edge id="e_d" source="e" target="d"/>
+
+    </graph>
+</graphml>

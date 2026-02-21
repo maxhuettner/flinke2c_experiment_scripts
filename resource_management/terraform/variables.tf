@@ -70,6 +70,12 @@ variable "default_user_data" {
   default     = ""
 }
 
+variable "root_volume_size_gb" {
+  description = "Root EBS volume size in GiB for all EC2 instances."
+  type        = number
+  default     = 16
+}
+
 variable "ec2_instances" {
   description = <<EOT
 Declarative description of the EC2 instances generated from the GraphML experiment configuration.
@@ -78,6 +84,7 @@ EOT
   type = map(object({
     ami                         = optional(string)
     instance_type               = string
+    private_ip                  = optional(string)
     subnet_id                   = optional(string)
     key_name                    = optional(string)
     associate_public_ip_address = optional(bool)

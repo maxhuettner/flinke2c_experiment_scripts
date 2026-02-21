@@ -7,11 +7,13 @@ rendering the inventory based on the GraphML files:
 
 1. **Cloud vs On‑prem** – every node must specify `node_class` (`cloud` or
    `onprem`) so roles can branch on the correct dependency set.
-2. **WireGuard metadata** – if a node participates in the WireGuard overlay, the
+2. **Node role** – set `node_type` (`source`, `sink`, `compute`) so the
+   `common` role can pre-pull the right Docker images.
+3. **WireGuard metadata** – if a node participates in the WireGuard overlay, the
    CLI should place a `wireguard` structure in host vars that includes the
    private key, interface address, listen port, and generated peer list. The
    peer list is derived from the GraphML edges.
-3. **Connection details** – set `ansible_host`, `ansible_user`, `ansible_ssh_private_key_file`
+4. **Connection details** – set `ansible_host`, `ansible_user`, `ansible_ssh_private_key_file`
    (or `ansible_password`) so Ansible can connect to each host.
 
 ```

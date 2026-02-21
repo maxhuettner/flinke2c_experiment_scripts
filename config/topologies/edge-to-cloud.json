@@ -1,0 +1,53 @@
+{
+  "nodes": [
+    { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "t3.micro", "node_type": "sink"},
+    { "id": "N1", "address": "10.10.0.11", "cloud_instance_type": "t3.micro", "node_type": "compute"},
+    { "id": "N2", "address": "10.10.0.12", "cloud_instance_type": "t3.micro", "node_type": "compute"},
+    { "id": "N3", "address": "10.10.0.13", "node_type": "compute", "on-prem-id": "zs03", "location": "on-prem" },
+    { "id": "N4", "address": "10.10.0.14", "node_type": "compute", "on-prem-id": "zs04", "location": "on-prem" },
+    { "id": "N5", "address": "10.10.0.15", "node_type": "compute", "on-prem-id": "zs05", "location": "on-prem" },
+    { "id": "src", "address": "10.10.0.16", "on-prem-id": "zs03", "location": "on-prem", "node_type": "source" }
+  ],
+  "edges": [
+    {
+      "source": "src",
+      "target": "N5"
+    },
+    {
+      "source": "N5",
+      "target": "N3"
+    },
+    {
+      "source": "N5",
+      "target": "N4"
+    },
+    {
+      "source": "N3",
+      "target": "N1"
+    },
+    {
+      "source": "N3",
+      "target": "N2"
+    },
+    {
+      "source": "N4",
+      "target": "N1"
+    },
+    {
+      "source": "N4",
+      "target": "N2"
+    },
+    {
+      "source": "N1",
+      "target": "N2"
+    },
+    {
+      "source": "N1",
+      "target": "snk"
+    },
+    {
+      "source": "N2",
+      "target": "snk"
+    }
+  ]
+}
