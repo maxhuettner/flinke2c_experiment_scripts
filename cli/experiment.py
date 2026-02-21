@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -199,27 +200,47 @@ async def _sync_file(
 async def _download_logs(
     conn: asyncssh.SSHClientConnection, remote_logs: str, local_dir: Path
 ) -> None:
-    """Download all files from remote_logs dir into local_dir."""
-    local_dir.mkdir(parents=True, exist_ok=True)
-    result = await _run(conn, f"ls {remote_logs} 2>/dev/null || true", check=False)
-    if not result:
+    """Download all files from remote_logs dir into local_dir, preserving structure."""
+    result = await conn.run(f"find {remote_logs} -type f 2>/dev/null", check=False)
+    files = [l.strip() for l in (result.stdout or "").splitlines() if l.strip()]
+    if not files:
         print(f"  (no log files found in {remote_logs})")
         return
+    local_dir.mkdir(parents=True, exist_ok=True)
     async with conn.start_sftp_client() as sftp:
-        for fname in result.splitlines():
-            fname = fname.strip()
-            if not fname:
-                continue
-            remote_file = f"{remote_logs}/{fname}"
-            local_file = local_dir / fname
+        for remote_file in files:
+            rel = remote_file[len(remote_logs):].lstrip("/")
+            local_file = local_dir / rel
+            local_file.parent.mkdir(parents=True, exist_ok=True)
             try:
                 await sftp.get(remote_file, str(local_file))
-                print(f"  downloaded {fname}")
+                print(f"  downloaded {rel}")
             except asyncssh.SFTPError as exc:
-                print(f"  warning: could not download {fname}: {exc}", file=sys.stderr)
+                print(f"  warning: could not download {rel}: {exc}", file=sys.stderr)
 
 
 # ── Container helpers ─────────────────────────────────────────────────────────
+
+async def _assert_running(
+    conn: asyncssh.SSHClientConnection, name: str, delay: float = 2.0
+) -> None:
+    """Wait *delay* seconds then raise if the container has already exited.
+
+    Call this immediately after `docker run -d` to catch immediate startup
+    crashes before they turn into a silent multi-minute wait.
+    """
+    await asyncio.sleep(delay)
+    result = await conn.run(
+        f"docker inspect --format={{{{.State.Status}}}} {name} 2>&1", check=False
+    )
+    status = (result.stdout or "").strip()
+    if status != "running":
+        logs = await conn.run(f"docker logs {name} 2>&1", check=False)
+        raise RuntimeError(
+            f"Container '{name}' exited immediately (status: {status!r}).\n"
+            f"Logs:\n{(logs.stdout or logs.stderr or '(no output)').strip()}"
+        )
+
 
 async def _stop_containers(
     conn: asyncssh.SSHClientConnection, names: list[str]
@@ -227,8 +248,29 @@ async def _stop_containers(
     if not names:
         return
     joined = " ".join(names)
-    # stop first (graceful), then force-remove
     await _run(conn, f"docker stop {joined} 2>/dev/null || true", check=False)
+    await _run(conn, f"docker rm -f {joined} 2>/dev/null || true", check=False)
+
+
+async def _graceful_stop_tcp(
+    conn: asyncssh.SSHClientConnection,
+    names: list[str],
+    timeout: int = 5,
+) -> None:
+    """Send 'q' to each TCP streaming container's stdin, then force-remove.
+
+    All containers receive the quit signal in parallel.  After *timeout*
+    seconds any that have not exited on their own are force-removed.
+    """
+    if not names:
+        return
+    cmds = " & ".join(
+        f"(printf 'q\\n'; sleep {timeout}) | timeout {timeout + 1}"
+        f" docker attach {n} 2>/dev/null"
+        for n in names
+    )
+    await _run(conn, f"{cmds}; wait", check=False)
+    joined = " ".join(names)
     await _run(conn, f"docker rm -f {joined} 2>/dev/null || true", check=False)
 
 
@@ -238,21 +280,26 @@ async def _poll_for_pattern(
     pattern: str,
     timeout: float,
     label: str = "",
+    since: Optional[int] = None,
 ) -> None:
     """Poll 'docker logs <container>' until *pattern* appears.
 
     Prints new lines as they appear. Raises TimeoutError if the pattern
     is not seen within *timeout* seconds.
 
+    *since* is an optional Unix timestamp; when set only logs produced
+    after that time are considered (useful for persistent containers).
+
     Note: monitored containers must NOT be started with --rm, otherwise
     Docker removes their log buffer on exit before we can read it.
     """
+    since_flag = f"--since {since} " if since is not None else ""
     deadline = time.monotonic() + timeout
     shown: set[str] = set()
 
     while time.monotonic() < deadline:
         result = await conn.run(
-            f"docker logs {container_name} 2>&1", check=False
+            f"docker logs {since_flag}{container_name} 2>&1", check=False
         )
         output = result.stdout or ""
 
@@ -265,6 +312,20 @@ async def _poll_for_pattern(
 
         if pattern in output:
             return
+
+        # Fail fast if the container exited before emitting the pattern
+        status_result = await conn.run(
+            f"docker inspect --format={{{{.State.Status}}}} {container_name} 2>&1",
+            check=False,
+        )
+        status = (status_result.stdout or "").strip()
+        if status == "exited":
+            logs_result = await conn.run(f"docker logs {container_name} 2>&1", check=False)
+            logs = (logs_result.stdout or logs_result.stderr or "(no output)").strip()
+            raise RuntimeError(
+                f"Container '{container_name}' exited before '{pattern}' was seen.\n"
+                f"Logs:\n{logs}"
+            )
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -293,14 +354,22 @@ async def _sync_source_data(
 
 async def _wait_both_done(
     src_conn: asyncssh.SSHClientConnection,
+    snk_conn: asyncssh.SSHClientConnection,
     bid_name: str,
     sink_name: str,
+    since: int,
     timeout: float = DONE_TIMEOUT,
 ) -> None:
-    """Wait concurrently for bid source and sink to signal completion."""
+    """Wait concurrently for bid source and sink to signal completion.
+
+    *since* is a Unix timestamp; only log lines produced after that time
+    are checked, so signals from earlier repetitions are ignored.
+    """
     await asyncio.gather(
-        _poll_for_pattern(src_conn, bid_name, DONE_SIGNAL, timeout, label=f"src/{bid_name}"),
-        _poll_for_pattern(src_conn, sink_name, DONE_SIGNAL, timeout, label=f"sink/{sink_name}"),
+        _poll_for_pattern(src_conn, bid_name, DONE_SIGNAL, timeout,
+                          label=f"src/{bid_name}", since=since),
+        _poll_for_pattern(snk_conn, sink_name, DONE_SIGNAL, timeout,
+                          label=f"sink/{sink_name}", since=since),
     )
 
 
@@ -336,10 +405,10 @@ def _coordinator_config(
         "    port: 6123",
         "  memory:",
         "    process:",
-        "      size: 8G",
+        "      size: 600m",
         "",
         "rest:",
-        "  address: 0.0.0.0",
+        f"  address: {jm_address}",
         "  bind-address: 0.0.0.0",
         "  port: 8081",
         "",
@@ -359,6 +428,7 @@ def _coordinator_config(
         "        -verbose:gc -XX:NewRatio=3 -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
         " -XX:ParallelGCThreads=4 --add-opens=java.base/java.util=ALL-UNNAMED",
         "      jobmanager: >-",
+        "        -Xms256m -Xmx768m",
         "        -Xloggc:$FLINK_LOG_DIR/jobmanager-gc.log",
         "        -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=2 -XX:GCLogFileSize=512M",
         "      taskmanager: >-",
@@ -538,152 +608,37 @@ async def _run_flink_repetition(
     total_reps: int,
     exp: ExperimentSpec,
     src_conn: asyncssh.SSHClientConnection,
-    src_home: str,
-    worker_nodes: list[NodeInfo],
-    worker_conns: dict[str, asyncssh.SSHClientConnection],
-    worker_homes: dict[str, str],
-    bid_extra: str,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    bid_name: str,
+    sink_name: str,
     combined_sql: str,
-    coordinator_cfg: str,
-    worker_cfgs: dict[str, str],
-    # graphml_content is None when placement_method is empty
-    graphml_content: Optional[str],
-    graphml_filename: str,
 ) -> None:
+    """Submit the SQL query and wait for both sources and sink to signal done.
+
+    All containers (sources, sink, Flink cluster) are already running and
+    stay up for the entire experiment; only the sql-client is started here.
+    """
+    rep_start = int(time.time())
     print(f"\n--- Repetition {rep}/{total_reps} ---")
-    run_id = f"{exp.name}-r{rep}-{int(time.time())}"
+    sql_name = f"flink-sql-{exp.name}-r{rep}-{rep_start}"
 
-    # Container names — no --rm on bid/sink so docker logs survives container exit
-    bid_name     = f"tcp-bid-{run_id}"
-    auction_name = f"tcp-auction-{run_id}"
-    sink_name    = f"tcp-sink-{run_id}"
-    jm_name      = f"flink-jm-{run_id}"
-    sql_name     = f"flink-sql-{run_id}"
-    tm_names     = {wn.id: f"flink-tm-{wn.id}-{run_id}" for wn in worker_nodes}
+    # ── Submit SQL query ───────────────────────────────────────────────────
+    print(f"  Submitting query '{exp.query}'...")
+    await _upload_text(snk_conn, combined_sql, f"{snk_home}/flink_query.sql")
+    await _run(snk_conn, " ".join([
+        "docker run -d --rm --network=host",
+        f"--name {sql_name}",
+        f"-v {snk_home}/flinke2c-conf:/conf/",
+        f"-v {snk_home}/flink_query.sql:/tmp/flink_query.sql:ro",
+        FLINK_IMAGE,
+        "sql-client embedded -f /tmp/flink_query.sql",
+    ]))
 
-    src_containers    = [bid_name, auction_name, sink_name, jm_name, sql_name]
-    worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
-
-    try:
-        # ── Clear previous logs ────────────────────────────────────────────
-        await _run(src_conn, f"rm -f {src_home}/logs/* 2>/dev/null || true", check=False)
-        for wn in worker_nodes:
-            await _run(
-                worker_conns[wn.id],
-                f"rm -f {worker_homes[wn.id]}/logs/* 2>/dev/null || true",
-                check=False,
-            )
-
-        # ── Upload Flink configs ───────────────────────────────────────────
-        print("  Uploading Flink configs...")
-        await _upload_text(
-            src_conn, coordinator_cfg, f"{src_home}/flinke2c-conf/config.yaml"
-        )
-        for wn in worker_nodes:
-            await _upload_text(
-                worker_conns[wn.id],
-                worker_cfgs[wn.id],
-                f"{worker_homes[wn.id]}/flinke2c-conf/config.yaml",
-            )
-
-        # ── Upload graphml for cluster placement ───────────────────────────
-        if exp.placement_method and graphml_content is not None:
-            print(f"  Uploading graphml ({graphml_filename})...")
-            await _upload_text(
-                src_conn, graphml_content,
-                f"{src_home}/flinke2c-conf/{graphml_filename}",
-            )
-
-        # ── Start TCP source containers ────────────────────────────────────
-        # --system flag: only NES needs it; Flink uses its own TCP connector
-        system_flag = "--system nes" if exp.system == "nes" else ""
-
-        print("  Starting bid source...")
-        await _run(src_conn, " ".join(filter(None, [
-            "docker run -d --init --network=host",
-            f"--name {bid_name}",
-            f"-v {src_home}/logs:/opt/tcp/logs",
-            f"-v {src_home}/data:/data:ro",
-            TCP_IMAGE,
-            "source /data/bid_events.parquet",
-            f"--address 0.0.0.0:10000 {system_flag} --schema bid --exp-name bid",
-            bid_extra,
-        ])).strip())
-
-        print("  Starting auction source...")
-        await _run(src_conn, " ".join(filter(None, [
-            "docker run -d --rm --init --network=host",
-            f"--name {auction_name}",
-            f"-v {src_home}/logs:/opt/tcp/logs",
-            f"-v {src_home}/data:/data:ro",
-            TCP_IMAGE,
-            "source /data/auction_events.parquet",
-            f"--address 0.0.0.0:10001 {system_flag} --schema auction --exp-name auction",
-        ])))
-
-        print("  Starting sink...")
-        await _run(src_conn, " ".join([
-            "docker run -d --init --network=host",
-            f"--name {sink_name}",
-            f"-v {src_home}/logs:/opt/tcp/logs",
-            TCP_IMAGE,
-            "sink --exp-name test",
-        ]))
-
-        # ── Wait for bid source ready ──────────────────────────────────────
-        print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
-        await _poll_for_pattern(
-            src_conn, bid_name, READY_SIGNAL,
-            timeout=READY_TIMEOUT, label=bid_name,
-        )
-        print("  Source is ready.")
-
-        # ── Start Flink cluster ────────────────────────────────────────────
-        print("  Starting Flink jobmanager...")
-        await _run(src_conn, " ".join([
-            "docker run -d --network=host",
-            f"--name {jm_name}",
-            f"-v {src_home}/flinke2c-conf:/conf/",
-            FLINK_IMAGE,
-            "jobmanager",
-        ]))
-
-        print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
-        for wn in worker_nodes:
-            wh = worker_homes[wn.id]
-            await _run(worker_conns[wn.id], " ".join([
-                "docker run -d --network=host",
-                f"--name {tm_names[wn.id]}",
-                f"-v {wh}/flinke2c-conf:/conf/",
-                FLINK_IMAGE,
-                "taskmanager",
-            ]))
-
-        print(f"  Waiting {CLUSTER_WARMUP}s for cluster to form...")
-        await asyncio.sleep(CLUSTER_WARMUP)
-
-        # ── Submit SQL query ───────────────────────────────────────────────
-        print(f"  Submitting query '{exp.query}'...")
-        await _upload_text(src_conn, combined_sql, f"{src_home}/flink_query.sql")
-        await _run(src_conn, " ".join([
-            "docker run -d --rm --network=host",
-            f"--name {sql_name}",
-            f"-v {src_home}/flinke2c-conf:/conf/",
-            f"-v {src_home}/flink_query.sql:/tmp/flink_query.sql:ro",
-            FLINK_IMAGE,
-            "sql-client embedded -f /tmp/flink_query.sql",
-        ]))
-
-        # ── Wait for completion ────────────────────────────────────────────
-        print(f"  Waiting for experiment to finish ('{DONE_SIGNAL}')...")
-        await _wait_both_done(src_conn, bid_name, sink_name)
-        print(f"  Repetition {rep} complete.")
-
-    finally:
-        print("  Stopping containers...")
-        await _stop_containers(src_conn, src_containers)
-        for wn in worker_nodes:
-            await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
+    # ── Wait for completion ────────────────────────────────────────────────
+    print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
+    await _wait_both_done(src_conn, snk_conn, bid_name, sink_name, since=rep_start)
+    print(f"  Repetition {rep} complete.")
 
 
 async def _run_flink_experiment(
@@ -693,10 +648,12 @@ async def _run_flink_experiment(
     src: NodeInfo,
     src_conn: asyncssh.SSHClientConnection,
     src_home: str,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    snk: NodeInfo,
     worker_nodes: list[NodeInfo],
     worker_conns: dict[str, asyncssh.SSHClientConnection],
     worker_homes: dict[str, str],
-    sink_id: Optional[str],
     qcfg: dict,
     output_dir: Path,
 ) -> None:
@@ -728,40 +685,163 @@ async def _run_flink_experiment(
             graphml_filename = static_path.name
             print(f"  Using static graphml: {static_path}")
         else:
-            graphml_content  = generate_graphml(graph, src.id, sink_id, task_slots)
+            graphml_content  = generate_graphml(graph, src.id, snk.id, task_slots)
             graphml_filename = "topology.graphml"
             print(f"  Generating graphml dynamically (no static file found: {static_path})")
 
     graphml_path    = f"/conf/{graphml_filename}" if graphml_filename else ""
-    coordinator_cfg = _coordinator_config(src.address, exp.placement_method, graphml_path)
+    coordinator_cfg = _coordinator_config(snk.address, exp.placement_method, graphml_path)
     worker_cfgs     = {
-        wn.id: _worker_config(src.address, wn.address, task_slots)
+        wn.id: _worker_config(snk.address, wn.address, task_slots)
         for wn in worker_nodes
     }
 
-    for rep in range(1, exp.repetitions + 1):
-        await _run_flink_repetition(
-            rep=rep,
-            total_reps=exp.repetitions,
-            exp=exp,
-            src_conn=src_conn,
-            src_home=src_home,
-            worker_nodes=worker_nodes,
-            worker_conns=worker_conns,
-            worker_homes=worker_homes,
-            bid_extra=bid_extra,
-            combined_sql=combined_sql,
-            coordinator_cfg=coordinator_cfg,
-            worker_cfgs=worker_cfgs,
-            graphml_content=graphml_content,
-            graphml_filename=graphml_filename,
+    # Experiment-scoped container names (shared across all repetitions)
+    exp_id       = f"{exp.name}-{int(time.time())}"
+    bid_name     = f"tcp-bid-{exp_id}"
+    auction_name = f"tcp-auction-{exp_id}"
+    sink_name    = f"tcp-sink-{exp_id}"
+    jm_name      = f"flink-jm-{exp_id}"
+    tm_names     = {wn.id: f"flink-tm-{wn.id}-{exp_id}" for wn in worker_nodes}
+
+    system_flag = "--system nes" if exp.system == "nes" else ""
+
+    # Kill leftover containers from any previous experiment.
+    # Note: multiple --filter name= flags use AND logic in Docker, so we use
+    # grep to match either prefix instead.
+    _kill_tcp_flink = (
+        "docker ps -a --format '{{.Names}}' | grep -E '^(tcp-|flink-)'"
+        " | xargs -r docker rm -f 2>/dev/null || true"
+    )
+    _kill_flink = (
+        "docker ps -a --format '{{.Names}}' | grep -E '^flink-'"
+        " | xargs -r docker rm -f 2>/dev/null || true"
+    )
+    await _run(src_conn, _kill_tcp_flink, check=False)
+    await _run(snk_conn, _kill_tcp_flink, check=False)
+    for wn in worker_nodes:
+        await _run(worker_conns[wn.id], _kill_flink, check=False)
+
+    # Clear logs once before starting (remove entire tree, then recreate dir)
+    await _run(src_conn, f"rm -rf {src_home}/logs && mkdir -p {src_home}/logs", check=False)
+    await _run(snk_conn, f"rm -rf {snk_home}/logs && mkdir -p {snk_home}/logs", check=False)
+    for wn in worker_nodes:
+        wh = worker_homes[wn.id]
+        await _run(worker_conns[wn.id], f"rm -rf {wh}/logs && mkdir -p {wh}/logs", check=False)
+
+    # Upload Flink configs once
+    print("  Uploading Flink configs...")
+    await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/flinke2c-conf/config.yaml")
+    for wn in worker_nodes:
+        await _upload_text(
+            worker_conns[wn.id], worker_cfgs[wn.id],
+            f"{worker_homes[wn.id]}/flinke2c-conf/config.yaml",
         )
 
-    # Download logs after all repetitions of this experiment
-    print(f"\nDownloading logs to {output_dir}/...")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
-    print(f"  Logs saved to {output_dir}")
+    if exp.placement_method and graphml_content is not None:
+        print(f"  Uploading graphml ({graphml_filename})...")
+        await _upload_text(
+            snk_conn, graphml_content,
+            f"{snk_home}/flinke2c-conf/{graphml_filename}",
+        )
+
+    # Start all containers — they stay up for every repetition
+    print("  Starting bid source...")
+    await _run(src_conn, " ".join(filter(None, [
+        "docker run -d -i --init --network=host",
+        f"--name {bid_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/bid_events.parquet",
+        f"--address 0.0.0.0:10000 {system_flag} --schema bid --exp-name {exp.name}",
+        bid_extra,
+    ])).strip())
+    await _assert_running(src_conn, bid_name)
+
+    print("  Starting auction source...")
+    await _run(src_conn, " ".join(filter(None, [
+        "docker run -d -i --init --network=host",
+        f"--name {auction_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/auction_events.parquet",
+        f"--address 0.0.0.0:10001 {system_flag} --schema auction --exp-name {exp.name}",
+    ])))
+    await _assert_running(src_conn, auction_name)
+
+    print("  Starting sink...")
+    await _run(snk_conn, " ".join([
+        "docker run -d -i --init --network=host",
+        f"--name {sink_name}",
+        f"-v {snk_home}/logs:/opt/tcp/logs",
+        TCP_IMAGE,
+        f"sink --exp-name {exp.name}",
+    ]))
+    await _assert_running(snk_conn, sink_name)
+
+    print("  Starting Flink jobmanager...")
+    await _run(snk_conn, " ".join([
+        "docker run -d --network=host",
+        f"--name {jm_name}",
+        f"-v {snk_home}/flinke2c-conf:/conf/",
+        FLINK_IMAGE,
+        "jobmanager",
+    ]))
+
+    print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
+    for wn in worker_nodes:
+        wh = worker_homes[wn.id]
+        await _run(worker_conns[wn.id], " ".join([
+            "docker run -d --network=host",
+            f"--name {tm_names[wn.id]}",
+            f"-v {wh}/flinke2c-conf:/conf/",
+            FLINK_IMAGE,
+            "taskmanager",
+        ]))
+
+    # Wait for sources to finish loading, then for the cluster to form
+    print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
+    await _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                            timeout=READY_TIMEOUT, label=bid_name)
+    print("  Source is ready.")
+    print(f"  Waiting {CLUSTER_WARMUP}s for cluster to form...")
+    await asyncio.sleep(CLUSTER_WARMUP)
+
+    worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
+
+    try:
+        for rep in range(1, exp.repetitions + 1):
+            await _run_flink_repetition(
+                rep=rep,
+                total_reps=exp.repetitions,
+                exp=exp,
+                src_conn=src_conn,
+                snk_conn=snk_conn,
+                snk_home=snk_home,
+                bid_name=bid_name,
+                sink_name=sink_name,
+                combined_sql=combined_sql,
+            )
+    finally:
+        print("  Stopping containers...")
+        # TCP streaming containers: send 'q', wait 5 s, then force-remove
+        await _graceful_stop_tcp(src_conn, [bid_name, auction_name])
+        await _graceful_stop_tcp(snk_conn, [sink_name])
+        # Flink containers: regular stop
+        await _stop_containers(snk_conn, [jm_name])
+        for wn in worker_nodes:
+            await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
+
+        # Always download logs — even if a repetition failed
+        print(f"\n  Downloading logs to {output_dir}/...")
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
+        await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
+        print(f"  Logs saved to {output_dir}")
 
 
 # ── Top-level entry point ─────────────────────────────────────────────────────
@@ -787,19 +867,24 @@ async def run_experiments(
     src = src_list[0]
 
     sink_list = [n for n in nodes.values() if n.node_type == "sink"]
-    sink_id   = sink_list[0].id if sink_list else None
+    if not sink_list:
+        raise RuntimeError(
+            "No node with node_type='sink' found in topology. "
+            "A dedicated sink node is required to run the TCP sink container."
+        )
+    snk = sink_list[0]
 
     worker_nodes = [n for n in nodes.values()
                     if n.node_type not in ("source", "sink")]
 
     print(f"Source / coordinator : {src.id}  ({src.host})")
+    print(f"Sink node            : {snk.id}  ({snk.host})")
     print(f"Worker nodes         : {[n.id for n in worker_nodes]}")
-    if sink_id:
-        print(f"Sink node            : {sink_id}")
 
     # Open SSH connections
     print("\nConnecting to nodes...")
     src_conn = await asyncssh.connect(**_conn_kwargs(src, key_path, passphrase))
+    snk_conn = await asyncssh.connect(**_conn_kwargs(snk, key_path, passphrase))
     worker_conns: dict[str, asyncssh.SSHClientConnection] = {}
 
     try:
@@ -810,6 +895,7 @@ async def run_experiments(
 
         # Resolve home directories for SFTP (~ is not expanded by SFTP protocol)
         src_home = await _get_home(src_conn)
+        snk_home = await _get_home(snk_conn)
         worker_homes = {
             wn.id: await _get_home(worker_conns[wn.id]) for wn in worker_nodes
         }
@@ -817,6 +903,7 @@ async def run_experiments(
         # One-time setup: directories and source data
         print("\nPreparing remote directories...")
         await _run(src_conn, f"mkdir -p {src_home}/data {src_home}/logs {src_home}/flinke2c-conf")
+        await _run(snk_conn, f"mkdir -p {snk_home}/logs {snk_home}/flinke2c-conf")
         for wn in worker_nodes:
             wh = worker_homes[wn.id]
             await _run(worker_conns[wn.id], f"mkdir -p {wh}/logs {wh}/flinke2c-conf")
@@ -839,10 +926,12 @@ async def run_experiments(
                 src=src,
                 src_conn=src_conn,
                 src_home=src_home,
+                snk_conn=snk_conn,
+                snk_home=snk_home,
+                snk=snk,
                 worker_nodes=worker_nodes,
                 worker_conns=worker_conns,
                 worker_homes=worker_homes,
-                sink_id=sink_id,
                 qcfg=qcfg,
                 output_dir=output_base / exp.name,
             )
@@ -852,4 +941,5 @@ async def run_experiments(
     finally:
         for conn in worker_conns.values():
             conn.close()
+        snk_conn.close()
         src_conn.close()

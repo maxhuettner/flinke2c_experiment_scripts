@@ -15,8 +15,6 @@ WITH
   );
 
 SET 'pipeline.object-reuse' = 'true';
-SET 'table.exec.mini-batch.enabled' = 'false';
-SET 'pipeline.operator-chaining.enabled'='false';
 
 INSERT INTO
   nexmark_q1

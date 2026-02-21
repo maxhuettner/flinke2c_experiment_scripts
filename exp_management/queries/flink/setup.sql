@@ -56,3 +56,5 @@ WITH
         'host' = '10.10.0.16',
         'port' = '10000'
     );
+
+SET 'table.exec.mini-batch.enabled' = 'false';

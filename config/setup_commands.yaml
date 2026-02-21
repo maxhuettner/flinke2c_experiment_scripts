@@ -1,4 +1,0 @@
-- type: "cmd"
-  cmd: "tail -f /etc/os-release"
-- type: "sftp_create_dir"
-  dir: "/home/mhuttner/test"
