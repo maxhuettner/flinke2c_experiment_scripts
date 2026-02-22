@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import shutil
 import sys
 import time
@@ -49,6 +50,7 @@ QUERIES_DIR       = Path("exp_management/queries/flink")
 CONFIGS_DIR       = Path("exp_management/configs/flink")
 QUERY_CONFIG_FILE = CONFIGS_DIR / "query_config.yml"
 SOURCE_DATA_DIR   = Path("exp_management/source_data")
+FLINK_LIB_DIR     = Path("lib")
 ANSIBLE_INVENTORY = Path("exp_management/ansible/inventory/generated_hosts.yml")
 
 FLINK_IMAGE = "maxhue/flinke2c:latest"
@@ -178,23 +180,6 @@ async def _upload_text(
             await fh.write(content)
 
 
-async def _sync_file(
-    conn: asyncssh.SSHClientConnection, local: Path, remote_path: str
-) -> bool:
-    """Upload *local* to *remote_path* only if missing or a different size.
-
-    Returns True if the file was uploaded, False if already up to date.
-    """
-    local_size = local.stat().st_size
-    async with conn.start_sftp_client() as sftp:
-        try:
-            st = await sftp.stat(remote_path)
-            if st.size == local_size:
-                return False
-        except asyncssh.SFTPError:
-            pass  # file doesn't exist — upload it
-        await sftp.put(str(local), remote_path)
-    return True
 
 
 async def _download_logs(
@@ -336,20 +321,56 @@ async def _poll_for_pattern(
 
 
 async def _sync_source_data(
-    conn: asyncssh.SSHClientConnection,
+    src: NodeInfo,
     src_home: str,
+    key_path: str,
 ) -> None:
-    """Sync local source data files to the remote ~/data/ directory, skipping unchanged files."""
+    """Rsync local source data to the remote ~/data/ directory (checksum-based)."""
     if not SOURCE_DATA_DIR.exists():
         return
-    data_files = [f for f in SOURCE_DATA_DIR.iterdir() if f.is_file()]
-    if not data_files:
+    if not any(f for f in SOURCE_DATA_DIR.iterdir() if f.is_file()):
         return
-    print(f"Syncing {len(data_files)} source data file(s)...")
-    for df in data_files:
-        print(f"  {df.name}: ", end="", flush=True)
-        uploaded = await _sync_file(conn, df, f"{src_home}/data/{df.name}")
-        print("uploaded" if uploaded else "already present, skipped")
+    print(f"Syncing source data to {src.user}@{src.host}:{src_home}/data/ ...")
+    proc = await asyncio.create_subprocess_exec(
+        "rsync", "--checksum", "--archive", "--verbose", "--human-readable",
+        "-e", f"ssh -i {_expand(key_path)} -o StrictHostKeyChecking=no -o BatchMode=yes",
+        str(SOURCE_DATA_DIR) + "/",
+        f"{src.user}@{src.host}:{src_home}/data/",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    for line in stdout.decode().splitlines():
+        line = line.strip()
+        if line and not line.startswith(("sending", "sent ", "total size")):
+            print(f"  {line}")
+    if proc.returncode != 0:
+        raise RuntimeError(f"rsync failed (exit {proc.returncode}):\n{stderr.decode()}")
+
+
+async def _sync_flink_libs(
+    node: NodeInfo,
+    node_home: str,
+    key_path: str,
+) -> None:
+    """Rsync local lib/*.jar to the remote ~/flinke2c-lib/ directory."""
+    if not FLINK_LIB_DIR.exists():
+        return
+    jars = [f for f in FLINK_LIB_DIR.iterdir() if f.suffix == ".jar"]
+    if not jars:
+        return
+    print(f"  Syncing {len(jars)} lib JAR(s) to {node.id}...")
+    proc = await asyncio.create_subprocess_exec(
+        "rsync", "--checksum", "--archive", "--verbose",
+        "-e", f"ssh -i {_expand(key_path)} -o StrictHostKeyChecking=no -o BatchMode=yes",
+        str(FLINK_LIB_DIR) + "/",
+        f"{node.user}@{node.host}:{node_home}/flinke2c-lib/",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"rsync lib failed for {node.id} (exit {proc.returncode}):\n{stderr.decode()}")
 
 
 async def _wait_both_done(
@@ -613,6 +634,7 @@ async def _run_flink_repetition(
     bid_name: str,
     sink_name: str,
     combined_sql: str,
+    lib_jars: list[Path],
 ) -> None:
     """Submit the SQL query and wait for both sources and sink to signal done.
 
@@ -623,17 +645,22 @@ async def _run_flink_repetition(
     print(f"\n--- Repetition {rep}/{total_reps} ---")
     sql_name = f"flink-sql-{exp.name}-r{rep}-{rep_start}"
 
+    sql_lib_mounts = " ".join(
+        f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+        for j in lib_jars
+    )
     # ── Submit SQL query ───────────────────────────────────────────────────
     print(f"  Submitting query '{exp.query}'...")
     await _upload_text(snk_conn, combined_sql, f"{snk_home}/flink_query.sql")
-    await _run(snk_conn, " ".join([
+    await _run(snk_conn, " ".join(filter(None, [
         "docker run -d --rm --network=host",
         f"--name {sql_name}",
         f"-v {snk_home}/flinke2c-conf:/conf/",
         f"-v {snk_home}/flink_query.sql:/tmp/flink_query.sql:ro",
+        sql_lib_mounts,
         FLINK_IMAGE,
         "sql-client embedded -f /tmp/flink_query.sql",
-    ]))
+    ])))
 
     # ── Wait for completion ────────────────────────────────────────────────
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
@@ -654,6 +681,7 @@ async def _run_flink_experiment(
     worker_nodes: list[NodeInfo],
     worker_conns: dict[str, asyncssh.SSHClientConnection],
     worker_homes: dict[str, str],
+    lib_jars: list[Path],
     qcfg: dict,
     output_dir: Path,
 ) -> None:
@@ -706,28 +734,20 @@ async def _run_flink_experiment(
 
     system_flag = "--system nes" if exp.system == "nes" else ""
 
-    # Kill leftover containers from any previous experiment.
-    # Note: multiple --filter name= flags use AND logic in Docker, so we use
-    # grep to match either prefix instead.
-    _kill_tcp_flink = (
-        "docker ps -a --format '{{.Names}}' | grep -E '^(tcp-|flink-)'"
-        " | xargs -r docker rm -f 2>/dev/null || true"
-    )
-    _kill_flink = (
-        "docker ps -a --format '{{.Names}}' | grep -E '^flink-'"
-        " | xargs -r docker rm -f 2>/dev/null || true"
-    )
-    await _run(src_conn, _kill_tcp_flink, check=False)
-    await _run(snk_conn, _kill_tcp_flink, check=False)
+    # Kill all containers on each node (dedicated experiment nodes).
+    _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
+    await _run(src_conn, _kill_all, check=False)
+    await _run(snk_conn, _kill_all, check=False)
     for wn in worker_nodes:
-        await _run(worker_conns[wn.id], _kill_flink, check=False)
+        await _run(worker_conns[wn.id], _kill_all, check=False)
 
-    # Clear logs once before starting (remove entire tree, then recreate dir)
-    await _run(src_conn, f"rm -rf {src_home}/logs && mkdir -p {src_home}/logs", check=False)
-    await _run(snk_conn, f"rm -rf {snk_home}/logs && mkdir -p {snk_home}/logs", check=False)
+    # Clear log contents before starting (sudo needed: container writes as root)
+    print("  Clearing remote logs...")
+    await _run(src_conn, f"sudo rm -rf {src_home}/logs/", check=False)
+    await _run(snk_conn, f"sudo rm -rf {snk_home}/logs/", check=False)
     for wn in worker_nodes:
         wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], f"rm -rf {wh}/logs && mkdir -p {wh}/logs", check=False)
+        await _run(worker_conns[wn.id], f"sudo rm -rf {wh}/logs/", check=False)
 
     # Upload Flink configs once
     print("  Uploading Flink configs...")
@@ -781,25 +801,35 @@ async def _run_flink_experiment(
     ]))
     await _assert_running(snk_conn, sink_name)
 
+    jm_lib_mounts = " ".join(
+        f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+        for j in lib_jars
+    )
     print("  Starting Flink jobmanager...")
-    await _run(snk_conn, " ".join([
+    await _run(snk_conn, " ".join(filter(None, [
         "docker run -d --network=host",
         f"--name {jm_name}",
         f"-v {snk_home}/flinke2c-conf:/conf/",
+        jm_lib_mounts,
         FLINK_IMAGE,
         "jobmanager",
-    ]))
+    ])))
 
     print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
     for wn in worker_nodes:
         wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], " ".join([
+        tm_lib_mounts = " ".join(
+            f"-v {wh}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+            for j in lib_jars
+        )
+        await _run(worker_conns[wn.id], " ".join(filter(None, [
             "docker run -d --network=host",
             f"--name {tm_names[wn.id]}",
             f"-v {wh}/flinke2c-conf:/conf/",
+            tm_lib_mounts,
             FLINK_IMAGE,
             "taskmanager",
-        ]))
+        ])))
 
     # Wait for sources to finish loading, then for the cluster to form
     print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
@@ -823,6 +853,7 @@ async def _run_flink_experiment(
                 bid_name=bid_name,
                 sink_name=sink_name,
                 combined_sql=combined_sql,
+                lib_jars=lib_jars,
             )
     finally:
         print("  Stopping containers...")
@@ -903,13 +934,21 @@ async def run_experiments(
         # One-time setup: directories and source data
         print("\nPreparing remote directories...")
         await _run(src_conn, f"mkdir -p {src_home}/data {src_home}/logs {src_home}/flinke2c-conf")
-        await _run(snk_conn, f"mkdir -p {snk_home}/logs {snk_home}/flinke2c-conf")
+        await _run(snk_conn, f"mkdir -p {snk_home}/logs {snk_home}/flinke2c-conf {snk_home}/flinke2c-lib")
         for wn in worker_nodes:
             wh = worker_homes[wn.id]
-            await _run(worker_conns[wn.id], f"mkdir -p {wh}/logs {wh}/flinke2c-conf")
+            await _run(worker_conns[wn.id], f"mkdir -p {wh}/logs {wh}/flinke2c-conf {wh}/flinke2c-lib")
 
         if not skip_data_upload:
-            await _sync_source_data(src_conn, src_home)
+            await _sync_source_data(src, src_home, key_path)
+
+        # Sync Flink lib JARs to snk and all workers
+        lib_jars = sorted(FLINK_LIB_DIR.glob("*.jar")) if FLINK_LIB_DIR.exists() else []
+        if lib_jars:
+            print("\nSyncing Flink lib JARs...")
+            await _sync_flink_libs(snk, snk_home, key_path)
+            for wn in worker_nodes:
+                await _sync_flink_libs(wn, worker_homes[wn.id], key_path)
 
         # Run each experiment in sequence
         for exp in experiments:
@@ -932,6 +971,7 @@ async def run_experiments(
                 worker_nodes=worker_nodes,
                 worker_conns=worker_conns,
                 worker_homes=worker_homes,
+                lib_jars=lib_jars,
                 qcfg=qcfg,
                 output_dir=output_base / exp.name,
             )

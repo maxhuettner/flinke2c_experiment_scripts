@@ -20,16 +20,21 @@
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
 experiments:
-  - name: flink_q1_cloud
-    system: flink
+  # - name: flink_q1_cloud
+  #   system: flink
+  #   query: q1
+  #   repetitions: 2
+
+  - name: nes_q1_cloud
+    system: nes
     query: q1
     repetitions: 2
 
-  - name: flink_q4_cloud
-    system: flink
-    query: q4
-    repetitions: 2
-    num_task_slots: 3
+  # - name: flink_q4_cloud
+  #   system: flink
+  #   query: q4
+  #   repetitions: 2
+  #   num_task_slots: 3
 
   # - name: flink_q5_cloud
   #   system: flink
@@ -39,7 +44,7 @@ experiments:
   # - name: flinke2c_td_q1_cloud
   #   system: flink
   #   query: q1
-  #   repetitions: 5
+  #   repetitions: 3
   #   placement_method: TOP_DOWN
   #   graphml_file: cloud.graphml
 
