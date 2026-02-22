@@ -1,6 +1,6 @@
 {
   "nodes": [
-    { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "t4g.small", "node_type": "sink"},
+    { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "t4g.medium", "node_type": "sink"},
     { "id": "N1", "address": "10.10.0.11", "cloud_instance_type": "t4g.small", "node_type": "compute"},
     { "id": "N2", "address": "10.10.0.12", "cloud_instance_type": "t4g.small", "node_type": "compute"},
     { "id": "N3", "address": "10.10.0.13", "cloud_instance_type": "t4g.small", "node_type": "compute"},

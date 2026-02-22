@@ -25,9 +25,19 @@ experiments:
   #   query: q1
   #   repetitions: 2
 
-  - name: nes_q1_cloud
+  # - name: nes_q1_cloud
+  #   system: nes
+  #   query: q1
+  #   repetitions: 2
+
+  - name: nes_q4_cloud
     system: nes
-    query: q1
+    query: q4
+    repetitions: 2
+
+  - name: nes_q5_cloud
+    system: nes
+    query: q5
     repetitions: 2
 
   # - name: flink_q4_cloud

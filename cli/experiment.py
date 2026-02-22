@@ -56,6 +56,12 @@ ANSIBLE_INVENTORY = Path("exp_management/ansible/inventory/generated_hosts.yml")
 FLINK_IMAGE = "maxhue/flinke2c:latest"
 TCP_IMAGE   = "maxhue/tcp-streaming"
 
+NES_QUERIES_DIR       = Path("exp_management/queries/nes")
+NES_COORDINATOR_IMAGE = "maxhue/nes-coordinator"
+NES_WORKER_IMAGE      = "maxhue/nes-worker"
+NES_REST_PORT         = 8081
+NES_WARMUP            = 10   # seconds for NES cluster to form
+
 READY_SIGNAL = "Reading & binary encoding done"
 DONE_SIGNAL  = "All connections closed, stopping logger"
 
@@ -547,6 +553,134 @@ def _worker_config(jm_address: str, tm_host: str, task_slots: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ── NES config generators ─────────────────────────────────────────────────────
+
+def _nes_coordinator_config(coordinator_host: str) -> str:
+    return f"""\
+logLevel: LOG_ERROR
+
+restIp: 127.0.0.1
+coordinatorHost: {coordinator_host}
+restPort: {NES_REST_PORT}
+
+worker:
+  localWorkerHost: {coordinator_host}
+  coordinatorHost: {coordinator_host}
+  numberOfBuffersInGlobalBufferManager: 4096
+  numberOfBuffersInSourceLocalBufferPool: 1024
+  bufferSizeInBytes: 262144
+
+  queryCompiler:
+    maxHashTableSize: 2147483648
+    joinStrategy: HASH_JOIN_LOCAL
+    numberOfPartitions: 512
+    preAllocPageCnt: 4
+    pageSize: 65536
+
+  workerId: 1
+
+logicalSources:
+  - logicalSourceName: bids
+    fields:
+      - name: auction
+        type: INT64
+      - name: bidder
+        type: INT64
+      - name: price
+        type: FLOAT64
+      - name: dateTime
+        type: INT64
+
+  - logicalSourceName: persons
+    fields:
+      - name: id
+        type: INT64
+      - name: dateTime
+        type: INT64
+
+  - logicalSourceName: auctions
+    fields:
+      - name: id
+        type: INT64
+      - name: initialBid
+        type: INT64
+      - name: reserve
+        type: INT64
+      - name: dateTime
+        type: INT64
+      - name: expires
+        type: INT64
+      - name: seller
+        type: INT64
+      - name: category
+        type: INT64
+"""
+
+
+def _nes_worker_config(
+    worker_host: str,
+    coordinator_host: str,
+    worker_id: int,
+    source_host: Optional[str] = None,
+) -> str:
+    cfg = f"""\
+logLevel: LOG_ERROR
+localWorkerHost: {worker_host}
+coordinatorHost: {coordinator_host}
+numberOfBuffersInGlobalBufferManager: 4096
+numberOfBuffersInSourceLocalBufferPool: 1024
+bufferSizeInBytes: 262144
+
+queryCompiler:
+  maxHashTableSize: 2147483648
+  joinStrategy: HASH_JOIN_LOCAL
+  numberOfPartitions: 512
+  preAllocPageCnt: 4
+  pageSize: 65536
+
+"""
+    if source_host is not None:
+        cfg += f"""\
+physicalSources:
+    - logicalSourceName: bids
+      physicalSourceName: bids_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {source_host}
+        socketPort: 10000
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: FE2C_BINARY
+
+    - logicalSourceName: auctions
+      physicalSourceName: auctions_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {source_host}
+        socketPort: 10001
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: FE2C_BINARY
+
+    - logicalSourceName: persons
+      physicalSourceName: persons_1
+      type: TCP_SOURCE
+      configuration:
+        socketHost: {source_host}
+        socketPort: 10002
+        decideMessageSize: BUFFER_SIZE_FROM_SOCKET
+        bytesUsedForSocketBufferSizeTransfer: 4
+        inputFormat: FE2C_BINARY
+
+"""
+    cfg += f"""\
+workerId: {worker_id}
+
+parentId: 1
+"""
+    return cfg
+
+
 # ── GraphML generator ─────────────────────────────────────────────────────────
 
 def generate_graphml(
@@ -875,6 +1009,192 @@ async def _run_flink_experiment(
         print(f"  Logs saved to {output_dir}")
 
 
+# ── NES experiment logic ──────────────────────────────────────────────────────
+
+async def _run_nes_repetition(
+    *,
+    rep: int,
+    total_reps: int,
+    exp: ExperimentSpec,
+    snk_conn: asyncssh.SSHClientConnection,
+    src_conn: asyncssh.SSHClientConnection,
+    bid_name: str,
+    sink_name: str,
+    query_str: str,
+) -> None:
+    rep_start = int(time.time())
+    print(f"\n--- Repetition {rep}/{total_reps} ---")
+
+    payload = _json.dumps({"userQuery": query_str, "placement": "TopDown"})
+    curl_cmd = (
+        f"curl -s -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/query/execute-query"
+        f" -H 'Content-Type: application/json'"
+        f" -d '{payload}'"
+    )
+    print(f"  Submitting NES query '{exp.query}'...")
+    result = await _run(snk_conn, curl_cmd)
+    print(f"  NES response: {result}")
+
+    print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
+    await _wait_both_done(src_conn, snk_conn, bid_name, sink_name, since=rep_start)
+    print(f"  Repetition {rep} complete.")
+
+
+async def _run_nes_experiment(
+    exp: ExperimentSpec,
+    src: NodeInfo,
+    src_conn: asyncssh.SSHClientConnection,
+    src_home: str,
+    snk: NodeInfo,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    worker_nodes: list[NodeInfo],
+    worker_conns: dict[str, asyncssh.SSHClientConnection],
+    worker_homes: dict[str, str],
+    output_dir: Path,
+) -> None:
+    query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
+    if not query_path.exists():
+        raise FileNotFoundError(f"NES query file not found: {query_path}")
+    query_str = query_path.read_text().strip()
+
+    # Build configs
+    coordinator_cfg = _nes_coordinator_config(snk.address)
+    # Workers: first compute node gets physicalSources pointing to src
+    worker_cfgs: dict[str, str] = {}
+    for idx, wn in enumerate(worker_nodes):
+        worker_id   = idx + 2   # coordinator=1; workers start at 2
+        source_host = src.address if idx == 0 else None
+        worker_cfgs[wn.id] = _nes_worker_config(
+            worker_host=wn.address,
+            coordinator_host=snk.address,
+            worker_id=worker_id,
+            source_host=source_host,
+        )
+
+    exp_id    = f"{exp.name}-{int(time.time())}"
+    bid_name  = f"tcp-bid-{exp_id}"
+    auc_name  = f"tcp-auction-{exp_id}"
+    nes_name  = f"nes-coord-{exp_id}"
+    sink_name = f"tcp-sink-{exp_id}"
+    wn_names  = {wn.id: f"nes-worker-{wn.id}-{exp_id}" for wn in worker_nodes}
+
+    # Kill all containers on all nodes
+    _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
+    await _run(src_conn, _kill_all, check=False)
+    await _run(snk_conn, _kill_all, check=False)
+    for wn in worker_nodes:
+        await _run(worker_conns[wn.id], _kill_all, check=False)
+
+    # Clear logs (sudo: containers write as root)
+    print("  Clearing remote logs...")
+    await _run(src_conn, f"sudo rm -rf {src_home}/logs/", check=False)
+    await _run(snk_conn, f"sudo rm -rf {snk_home}/logs/", check=False)
+
+    # Upload NES configs
+    print("  Uploading NES configs...")
+    await _run(snk_conn, f"mkdir -p {snk_home}/nes-conf")
+    await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/nes-conf/coordinator.yaml")
+    for wn in worker_nodes:
+        wh = worker_homes[wn.id]
+        await _run(worker_conns[wn.id], f"mkdir -p {wh}/nes-conf", check=False)
+        await _upload_text(worker_conns[wn.id], worker_cfgs[wn.id], f"{wh}/nes-conf/worker.yaml")
+
+    print("  Starting bid source...")
+    await _run(src_conn, " ".join([
+        "docker run -d -i --init --network=host",
+        f"--name {bid_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/bid_events.parquet",
+        f"--address 0.0.0.0:10000 --system nes --schema bid --exp-name {exp.name}",
+    ]))
+    await _assert_running(src_conn, bid_name)
+
+    print("  Starting auction source...")
+    await _run(src_conn, " ".join([
+        "docker run -d -i --init --network=host",
+        f"--name {auc_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/auction_events.parquet",
+        f"--address 0.0.0.0:10001 --system nes --schema auction --exp-name {exp.name}",
+    ]))
+    await _assert_running(src_conn, auc_name)
+
+    # Start TCP sink on snk
+    print("  Starting sink...")
+    await _run(snk_conn, " ".join([
+        "docker run -d -i --init --network=host",
+        f"--name {sink_name}",
+        f"-v {snk_home}/logs:/opt/tcp/logs",
+        TCP_IMAGE,
+        f"sink --exp-name {exp.name}",
+    ]))
+    await _assert_running(snk_conn, sink_name)
+
+    # Start NES coordinator on snk
+    print("  Starting NES coordinator...")
+    await _run(snk_conn, " ".join([
+        "docker run -d --init --network=host",
+        f"--name {nes_name}",
+        f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
+        NES_COORDINATOR_IMAGE,
+    ]))
+    await _assert_running(snk_conn, nes_name)
+
+    # Wait for bid source to finish loading data
+    print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
+    await _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                            timeout=READY_TIMEOUT, label=bid_name)
+    print("  Source is ready.")
+
+    # Start NES workers on compute nodes
+    print(f"  Starting {len(worker_nodes)} NES worker(s)...")
+    for wn in worker_nodes:
+        wh = worker_homes[wn.id]
+        await _run(worker_conns[wn.id], " ".join([
+            "docker run -d --init --network=host",
+            f"--name {wn_names[wn.id]}",
+            f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
+            NES_WORKER_IMAGE,
+        ]))
+        await _assert_running(worker_conns[wn.id], wn_names[wn.id])
+
+    print(f"  Waiting {NES_WARMUP}s for NES cluster to form...")
+    await asyncio.sleep(NES_WARMUP)
+
+    try:
+        for rep in range(1, exp.repetitions + 1):
+            await _run_nes_repetition(
+                rep=rep,
+                total_reps=exp.repetitions,
+                exp=exp,
+                snk_conn=snk_conn,
+                src_conn=src_conn,
+                bid_name=bid_name,
+                sink_name=sink_name,
+                query_str=query_str,
+            )
+    finally:
+        print("  Stopping containers...")
+        await _graceful_stop_tcp(src_conn, [bid_name, auc_name])
+        await _graceful_stop_tcp(snk_conn, [sink_name])
+        await _stop_containers(snk_conn, [nes_name])
+        for wn in worker_nodes:
+            await _stop_containers(worker_conns[wn.id], [wn_names[wn.id]])
+
+        print(f"\n  Downloading logs to {output_dir}/...")
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
+        await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
+        print(f"  Logs saved to {output_dir}")
+
+
 # ── Top-level entry point ─────────────────────────────────────────────────────
 
 async def run_experiments(
@@ -953,28 +1273,45 @@ async def run_experiments(
         # Run each experiment in sequence
         for exp in experiments:
             print(f"\n{'='*60}")
-            print(f"Experiment : {exp.name}")
+            print(f"Experiment : {exp.name}  [{exp.system}]")
             print(f"Query      : {exp.query}   Reps: {exp.repetitions}"
                   f"   Placement: {exp.placement_method or 'default'}")
             print(f"{'='*60}")
 
-            await _run_flink_experiment(
-                exp=exp,
-                topology_file=topology_file,
-                graph=graph,
-                src=src,
-                src_conn=src_conn,
-                src_home=src_home,
-                snk_conn=snk_conn,
-                snk_home=snk_home,
-                snk=snk,
-                worker_nodes=worker_nodes,
-                worker_conns=worker_conns,
-                worker_homes=worker_homes,
-                lib_jars=lib_jars,
-                qcfg=qcfg,
-                output_dir=output_base / exp.name,
-            )
+            if exp.system == "nes":
+                await _run_nes_experiment(
+                    exp=exp,
+                    src=src,
+                    src_conn=src_conn,
+                    src_home=src_home,
+                    snk=snk,
+                    snk_conn=snk_conn,
+                    snk_home=snk_home,
+                    worker_nodes=worker_nodes,
+                    worker_conns=worker_conns,
+                    worker_homes=worker_homes,
+                    output_dir=output_base / exp.name,
+                )
+            elif exp.system == "flink":
+                await _run_flink_experiment(
+                    exp=exp,
+                    topology_file=topology_file,
+                    graph=graph,
+                    src=src,
+                    src_conn=src_conn,
+                    src_home=src_home,
+                    snk_conn=snk_conn,
+                    snk_home=snk_home,
+                    snk=snk,
+                    worker_nodes=worker_nodes,
+                    worker_conns=worker_conns,
+                    worker_homes=worker_homes,
+                    lib_jars=lib_jars,
+                    qcfg=qcfg,
+                    output_dir=output_base / exp.name,
+                )
+            else:
+                raise ValueError(f"Unknown system: {exp.system!r}. Supported: 'flink', 'nes'")
 
         print("\nAll experiments complete.")
 
