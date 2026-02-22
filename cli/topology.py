@@ -52,7 +52,7 @@ def load_topology(path: str) -> nx.Graph:
             id=nd["id"],
             node_type=nd.get("node_type", "Compute"),
             address=nd.get("address", ""),
-            speed=nd.get("speed"),
+            speed=int(nd["speed"]) if nd.get("speed") is not None else None,
             provision=nd.get("provision", "auto"),
             location=nd.get("location", "cloud"),
             # Backward-compatible alias: cloud_instance_type.

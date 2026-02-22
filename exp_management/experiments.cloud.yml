@@ -20,56 +20,63 @@
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
 experiments:
-  # - name: flink_q1_cloud
-  #   system: flink
-  #   query: q1
-  #   repetitions: 2
+  - name: flink_q1_cloud
+    system: flink
+    query: q1
+    repetitions: 5
 
-  # - name: nes_q1_cloud
-  #   system: nes
-  #   query: q1
-  #   repetitions: 2
+  - name: flink_q4_cloud
+    system: flink
+    query: q4
+    repetitions: 5
+    num_task_slots: 3
+
+  - name: flink_q5_cloud
+    system: flink
+    query: q5
+    repetitions: 5
+    
+  - name: flinke2c_td_q1_cloud
+    system: flink
+    query: q1
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+
+  - name: flinke2c_bu_q1_cloud
+    system: flink
+    query: q1
+    repetitions: 5
+    placement_method: BOTTOM_UP
+    graphml_file: cloud.graphml
+
+  - name: flinke2c_td_q4_cloud
+    system: flink
+    query: q4
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+    num_task_slots: 3
+
+  - name: flinke2c_td_q5_cloud
+    system: flink
+    query: q5
+    repetitions: 5
+    placement_method: TOP_DOWN
+    graphml_file: cloud.graphml
+    num_task_slots: 3
+
+  - name: nes_q1_cloud
+    system: nes
+    query: q1
+    repetitions: 5
 
   - name: nes_q4_cloud
     system: nes
     query: q4
-    repetitions: 2
+    repetitions: 5
 
   - name: nes_q5_cloud
     system: nes
     query: q5
-    repetitions: 2
-
-  # - name: flink_q4_cloud
-  #   system: flink
-  #   query: q4
-  #   repetitions: 2
-  #   num_task_slots: 3
-
-  # - name: flink_q5_cloud
-  #   system: flink
-  #   query: q5
-  #   repetitions: 5
-    
-  # - name: flinke2c_td_q1_cloud
-  #   system: flink
-  #   query: q1
-  #   repetitions: 3
-  #   placement_method: TOP_DOWN
-  #   graphml_file: cloud.graphml
-
-  # - name: flinke2c_td_q4_cloud
-  #   system: flink
-  #   query: q4
-  #   repetitions: 5
-  #   placement_method: TOP_DOWN
-  #   graphml_file: cloud.graphml
-  #   num_task_slots: 3
-
-  # - name: flinke2c_td_q5_cloud
-  #   system: flink
-  #   query: q5
-  #   repetitions: 5
-  #   placement_method: TOP_DOWN
-  #   graphml_file: cloud.graphml
-  #   num_task_slots: 3
+    repetitions: 5

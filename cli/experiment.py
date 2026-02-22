@@ -91,6 +91,7 @@ class NodeInfo:
     user: str
     node_type: str  # "source" / "sink" / "compute"
     address: str    # overlay/topology address
+    speed: Optional[int] = None  # CPU cap in % (e.g. 50 → --cpus 0.50)
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
@@ -145,6 +146,7 @@ def load_nodes(topology_file: str) -> dict[str, NodeInfo]:
             user=iv.get("ansible_user", "ubuntu"),
             node_type=topo.node_type.lower(),
             address=topo.address,
+            speed=topo.speed,
         )
     return nodes
 
@@ -324,6 +326,13 @@ async def _poll_for_pattern(
         f"Timed out after {timeout:.0f}s waiting for '{pattern}' "
         f"in container '{container_name}'"
     )
+
+
+def _cpus_flag(node: NodeInfo) -> str:
+    """Return a --cpus docker flag when the node has a speed cap, else empty string."""
+    if node.speed is not None:
+        return f"--cpus {node.speed / 100:.2f}"
+    return ""
 
 
 async def _sync_source_data(
@@ -959,6 +968,7 @@ async def _run_flink_experiment(
         await _run(worker_conns[wn.id], " ".join(filter(None, [
             "docker run -d --network=host",
             f"--name {tm_names[wn.id]}",
+            _cpus_flag(wn),
             f"-v {wh}/flinke2c-conf:/conf/",
             tm_lib_mounts,
             FLINK_IMAGE,
@@ -1155,12 +1165,13 @@ async def _run_nes_experiment(
     print(f"  Starting {len(worker_nodes)} NES worker(s)...")
     for wn in worker_nodes:
         wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], " ".join([
+        await _run(worker_conns[wn.id], " ".join(filter(None, [
             "docker run -d --init --network=host",
             f"--name {wn_names[wn.id]}",
+            _cpus_flag(wn),
             f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
             NES_WORKER_IMAGE,
-        ]))
+        ])))
         await _assert_running(worker_conns[wn.id], wn_names[wn.id])
 
     print(f"  Waiting {NES_WARMUP}s for NES cluster to form...")
