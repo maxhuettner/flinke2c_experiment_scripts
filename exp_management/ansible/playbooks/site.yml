@@ -1,7 +1,8 @@
 ---
 - name: Prepare experiment infrastructure (cloud + on-prem)
   hosts: all
-  become: true
+  strategy: free
+  become: false
   gather_facts: false
   vars_files:
     - ../group_vars/all.yml
@@ -14,20 +15,41 @@
         delay: 5
         sleep: 5
         timeout: 300
+      become: false
     - name: Bootstrap Python/Apt runtime on Debian-family hosts
       ansible.builtin.raw: |
         if command -v apt-get >/dev/null 2>&1; then
           export DEBIAN_FRONTEND=noninteractive
-          apt-get -o DPkg::Lock::Timeout=300 update -y
-          apt-get -o DPkg::Lock::Timeout=300 install -y python3 python3-apt python3-cffi-backend python3-cryptography
+          # Fast path: skip apt entirely when runtime deps are already present.
+          if /usr/bin/python3 -c "import _cffi_backend, cryptography" >/dev/null 2>&1; then
+            exit 0
+          fi
+          # Bound apt execution time so a mirror/lock issue cannot hang forever.
+          timeout 300 apt-get \
+            -o DPkg::Lock::Timeout=120 \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            update -y
+          timeout 300 apt-get \
+            -o DPkg::Lock::Timeout=120 \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            install -y python3 python3-apt python3-cffi-backend python3-cryptography
           if ! /usr/bin/python3 -c "import _cffi_backend, cryptography" >/dev/null 2>&1; then
-            apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall python3-cffi-backend python3-cryptography
+            timeout 180 apt-get \
+              -o DPkg::Lock::Timeout=120 \
+              install -y --reinstall python3-cffi-backend python3-cryptography
             /usr/bin/python3 -c "import _cffi_backend, cryptography"
           fi
         fi
       changed_when: false
-    - name: Gather facts
-      ansible.builtin.setup:
+      when: not (skip_bootstrap | default(false) | bool)
+      become: true
   roles:
     - role: common
+      when: not (skip_common | default(false) | bool)
+      become: true
     - role: wireguard
+      become: true

@@ -64,6 +64,12 @@ variable "wireguard_udp_port" {
   default     = 51820
 }
 
+variable "wireguard_udp_port_max" {
+  description = "Upper bound of the WireGuard UDP port range exposed on experiment instances."
+  type        = number
+  default     = 51999
+}
+
 variable "default_user_data" {
   description = "User data script that is injected into every instance unless overridden."
   type        = string

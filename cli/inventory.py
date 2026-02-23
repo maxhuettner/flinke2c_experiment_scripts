@@ -39,13 +39,20 @@ def _is_on_prem_node(graph: nx.Graph, node_id: str) -> bool:
     return node.is_on_prem()
 
 
-def _build_cross_location_graph(graph: nx.Graph) -> nx.Graph:
-    """Return a graph that only keeps cloud<->on-prem edges."""
+def _build_wireguard_graph(graph: nx.Graph) -> nx.Graph:
+    """Return a graph that excludes cloud<->cloud edges.
+
+    Cloud nodes communicate natively via VPC routing.  All other edges —
+    cloud<->on-prem and on-prem<->on-prem — get WireGuard tunnels so that
+    every node can reach every other node through the overlay and bandwidth
+    can be throttled on any link.
+    """
     wg_graph: nx.Graph = nx.Graph()
     wg_graph.add_nodes_from(graph.nodes(data=True))
 
     for u, v, attrs in graph.edges(data=True):
-        if _is_on_prem_node(graph, u) == _is_on_prem_node(graph, v):
+        # Skip cloud<->cloud edges: those use native VPC routing.
+        if not _is_on_prem_node(graph, u) and not _is_on_prem_node(graph, v):
             continue
         wg_graph.add_edge(u, v, **attrs)
 
@@ -64,6 +71,154 @@ def _assign_interface_addresses(
     }
 
 
+# Internal keys written by earlier tool versions; strip them from the output.
+# Keep wireguard_endpoint so WireGuard peer endpoint derivation can use it.
+_ONPREM_STRIP_KEYS = {"topology_node_id"}
+
+
+def _build_onprem_hosts(
+    graph: nx.Graph,
+    onprem_file_vars: dict,
+) -> tuple[dict, dict[str, str]]:
+    """Build on-prem host entries and hostname→topo-node-id map from the graph.
+
+    The topology's ``on-prem-id`` field is the authoritative source of which
+    physical hosts participate and how they map to logical topology nodes.
+    Supplementary vars from *onprem_file_vars* (e.g. ansible_user) are merged
+    in, but internal-only keys are stripped.  When two topology nodes share an
+    on-prem-id (same machine acting as multiple logical nodes) the first one in
+    document order wins — typically the node with cross-location WireGuard edges.
+    """
+    onprem_id_to_topo: dict[str, str] = {}
+    onprem_hosts: dict = {}
+
+    for nid in graph.nodes():
+        topo_node = graph.nodes[nid]["data"]
+        if not topo_node.is_on_prem():
+            continue
+        opid = topo_node.extra.get("on-prem-id")
+        hostname = opid or nid
+        if opid and opid not in onprem_id_to_topo:
+            onprem_id_to_topo[opid] = nid
+        if hostname not in onprem_hosts:
+            file_vars = {
+                k: v for k, v in (onprem_file_vars.get(hostname) or {}).items()
+                if k not in _ONPREM_STRIP_KEYS
+            }
+            onprem_hosts[hostname] = file_vars
+
+    return onprem_hosts, onprem_id_to_topo
+
+
+def _build_wg_configs(
+    graph: nx.Graph,
+    cloud_host_ips: dict[str, str],
+    onprem_hosts: dict,
+    onprem_id_to_topo: dict[str, str],
+    listen_port: int,
+    salt: str,
+) -> dict:
+    """Compute per-node WireGuard ECMP config for all nodes in the overlay.
+
+    Cloud<->cloud edges are excluded (VPC routing handles those).  All other
+    edges — cloud<->on-prem and on-prem<->on-prem — get WireGuard tunnels.
+    On-prem nodes use their topology ``address`` as the LAN endpoint; an
+    explicit ``ansible_host`` in onprem_hosts overrides that if set.
+    """
+    onprem_host_ips: dict[str, str] = {}
+    for hostname, vars_ in onprem_hosts.items():
+        ip = vars_.get("wireguard_endpoint") or vars_.get("ansible_host")
+        if ip:
+            onprem_host_ips[onprem_id_to_topo.get(hostname, hostname)] = ip
+        else:
+            topo_id = onprem_id_to_topo.get(hostname, hostname)
+            print(
+                f"  [warn] on-prem host '{hostname}' (topology node '{topo_id}') has no "
+                "wireguard_endpoint/ansible_host in onprem.yml; falling back to topology "
+                "address for peer endpoints, which may be unreachable from other hosts"
+            )
+
+    wg_graph = _build_wireguard_graph(graph)
+    wg_nodes = sorted(nid for nid, deg in wg_graph.degree() if deg > 0)
+    wg_host_ips = {**cloud_host_ips, **onprem_host_ips}
+
+    wg_node_ids = []
+    for nid in wg_nodes:
+        if nid in wg_host_ips or _is_on_prem_node(graph, nid):
+            wg_node_ids.append(nid)
+        else:
+            print(
+                f"  [warn] no endpoint IP for cloud node '{nid}' "
+                "(expected in Terraform output), skipping WireGuard edges for this node"
+            )
+
+    # route_address_map covers ALL topology nodes so that cloud-only nodes
+    # (e.g. snk with no WireGuard interfaces) appear in AllowedIPs when
+    # on-prem nodes can reach them transitively through a cloud gateway.
+    route_address_map = {nid: graph.nodes[nid]["data"].address for nid in graph.nodes()}
+    cloud_wg_nodes = [nid for nid in wg_node_ids if nid in cloud_host_ips]
+    interface_address_map = _assign_interface_addresses(cloud_wg_nodes)
+    for nid in wg_node_ids:
+        if nid not in interface_address_map:
+            interface_address_map[nid] = route_address_map[nid]
+
+    on_prem_nodes = {nid for nid in wg_node_ids if _is_on_prem_node(graph, nid)}
+
+    # On-prem nodes are reachable at their topology address on the local LAN.
+    # ansible_host (from onprem_hosts) overrides this if a different IP is set.
+    onprem_lan_ips = {nid: graph.nodes[nid]["data"].address for nid in on_prem_nodes}
+    host_public_ips = {**cloud_host_ips, **onprem_lan_ips, **onprem_host_ips}
+
+    return build_wireguard_ecmp_config(
+        graph=wg_graph,
+        host_public_ips=host_public_ips,
+        node_ids=wg_node_ids,
+        listen_port=listen_port,
+        salt=salt,
+        route_address_map=route_address_map,
+        interface_address_map=interface_address_map,
+        on_prem_nodes=on_prem_nodes,
+        routing_graph=graph,
+    )
+
+
+def _build_cloud_entry(
+    node_id: str,
+    ip: str,
+    graph: nx.Graph,
+    ansible_user: str,
+    ansible_key: Optional[str],
+    wg_configs: dict,
+) -> dict:
+    entry: dict = {"ansible_host": ip, "ansible_user": ansible_user, "node_class": "cloud"}
+    if node_id in graph:
+        entry["node_type"] = graph.nodes[node_id]["data"].node_type.lower()
+    if ansible_key:
+        entry["ansible_ssh_private_key_file"] = ansible_key
+    if node_id in wg_configs and wg_configs[node_id]["wireguard_interfaces"]:
+        entry["wireguard_interfaces"] = wg_configs[node_id]["wireguard_interfaces"]
+        entry["wireguard_ecmp_routes"] = wg_configs[node_id].get("wireguard_ecmp_routes", [])
+    return entry
+
+
+def _apply_onprem_wg(
+    onprem_hosts: dict,
+    onprem_id_to_topo: dict[str, str],
+    graph: nx.Graph,
+    wg_configs: dict,
+) -> None:
+    """Stamp WireGuard config and metadata onto on-prem host entries in-place."""
+    for hostname, entry in onprem_hosts.items():
+        topo_nid = onprem_id_to_topo.get(hostname, hostname)
+        if topo_nid in graph:
+            entry.setdefault("node_type", graph.nodes[topo_nid]["data"].node_type.lower())
+        cfg = wg_configs.get(topo_nid, {})
+        if cfg.get("wireguard_interfaces"):
+            entry.setdefault("wireguard_interfaces", cfg["wireguard_interfaces"])
+            entry.setdefault("wireguard_ecmp_routes", cfg.get("wireguard_ecmp_routes", []))
+            entry.setdefault("node_class", "onprem")
+
+
 def write_inventory(
     graph: nx.Graph,
     instance_map: dict[str, dict],
@@ -78,76 +233,31 @@ def write_inventory(
 
     Cloud hosts are sourced from *instance_map* (keyed by node id, values
     contain ``public_ip`` / ``private_ip`` as returned by ``terraform output
-    -json``).  On-prem hosts are copied verbatim from *onprem_path* so
-    manually managed static inventory entries are preserved.
+    -json``).  On-prem hosts are derived from the topology's ``on-prem-id``
+    fields — every on-prem node that carries one gets an inventory entry
+    automatically.  *onprem_path* is optional and provides supplementary vars
+    (ansible_user, …) that are merged in for matching hosts.
 
     WireGuard ECMP configuration is generated only for cloud<->on-prem links.
     Cloud<->cloud edges rely on native VPC routing and do not create WireGuard
     interfaces.
     """
-    onprem_hosts = _load_onprem(onprem_path)
-    topology_nodes = set(graph.nodes())
-    filtered_onprem_hosts: dict = {}
-    for node_id, vars_ in onprem_hosts.items():
-        if node_id not in topology_nodes:
-            print(f"  [info] on-prem host '{node_id}' not present in selected topology, skipping")
-            continue
-        if not _is_on_prem_node(graph, node_id):
-            print(f"  [warn] host '{node_id}' is listed in onprem inventory but topology marks it as cloud; skipping")
-            continue
-        filtered_onprem_hosts[node_id] = vars_
-    onprem_hosts = filtered_onprem_hosts
+    onprem_file_vars = _load_onprem(onprem_path)
+    onprem_hosts, onprem_id_to_topo = _build_onprem_hosts(graph, onprem_file_vars)
 
-    # Cloud endpoints (Terraform output).
     cloud_host_ips: dict[str, str] = {}
     for node_id, meta in instance_map.items():
         ip = meta.get("public_ip") or meta.get("private_ip")
         if ip:
             cloud_host_ips[node_id] = ip
 
-    # On-prem endpoints (static inventory).
-    onprem_host_ips: dict[str, str] = {}
-    for node_id, vars_ in onprem_hosts.items():
-        ip = vars_.get("wireguard_endpoint") or vars_.get("ansible_host")
-        if ip:
-            onprem_host_ips[node_id] = ip
-
-    # Build WireGuard graph from mixed-location edges only.
-    wg_graph = _build_cross_location_graph(graph)
-    wg_nodes = sorted([nid for nid, deg in wg_graph.degree() if deg > 0])
-
-    # Endpoint map for peers that can actually form tunnels.
-    wg_host_ips = {**cloud_host_ips, **onprem_host_ips}
-    wg_node_ids = [nid for nid in wg_nodes if nid in wg_host_ips]
-
-    missing_wg_endpoints = [nid for nid in wg_nodes if nid not in wg_host_ips]
-    for nid in missing_wg_endpoints:
-        print(
-            f"  [warn] no endpoint IP for '{nid}' (expected in Terraform output or onprem inventory), "
-            "skipping WireGuard edges for this node"
-        )
-
-    # Route targets use topology node addresses. Cloud WireGuard interfaces
-    # receive dedicated tunnel IPs to avoid clashing with EC2 private IPs.
-    route_address_map = {
-        nid: graph.nodes[nid]["data"].address
-        for nid in wg_node_ids
-    }
-    cloud_wg_nodes = [nid for nid in wg_node_ids if nid in cloud_host_ips]
-    interface_address_map = _assign_interface_addresses(cloud_wg_nodes)
-    for nid in wg_node_ids:
-        if nid in interface_address_map:
-            continue
-        interface_address_map[nid] = route_address_map[nid]
-
-    wg_configs = build_wireguard_ecmp_config(
-        graph=wg_graph,
-        host_public_ips=wg_host_ips,
-        node_ids=wg_node_ids,
+    wg_configs = _build_wg_configs(
+        graph=graph,
+        cloud_host_ips=cloud_host_ips,
+        onprem_hosts=onprem_hosts,
+        onprem_id_to_topo=onprem_id_to_topo,
         listen_port=wg_listen_port,
         salt=wg_salt,
-        route_address_map=route_address_map,
-        interface_address_map=interface_address_map,
     )
 
     cloud_hosts: dict = {}
@@ -156,44 +266,13 @@ def write_inventory(
         if not ip:
             print(f"  [warn] {node_id} has no reachable IP, skipping inventory entry")
             continue
+        cloud_hosts[node_id] = _build_cloud_entry(
+            node_id, ip, graph, ansible_user, ansible_key, wg_configs
+        )
 
-        node_type = None
-        if node_id in graph:
-            node_type = graph.nodes[node_id]["data"].node_type.lower()
+    _apply_onprem_wg(onprem_hosts, onprem_id_to_topo, graph, wg_configs)
 
-        entry: dict = {
-            "ansible_host": ip,
-            "ansible_user": ansible_user,
-            "node_class": "cloud",
-        }
-        if node_type:
-            entry["node_type"] = node_type
-        if ansible_key:
-            entry["ansible_ssh_private_key_file"] = ansible_key
-        if node_id in wg_configs and wg_configs[node_id]["wireguard_interfaces"]:
-            entry["wireguard_interfaces"] = wg_configs[node_id]["wireguard_interfaces"]
-            entry["wireguard_ecmp_routes"] = wg_configs[node_id].get("wireguard_ecmp_routes", [])
-
-        cloud_hosts[node_id] = entry
-
-    # Populate on-prem WireGuard metadata when host IDs match topology node IDs.
-    for node_id, entry in onprem_hosts.items():
-        if node_id in graph:
-            entry.setdefault("node_type", graph.nodes[node_id]["data"].node_type.lower())
-        if node_id in wg_configs and wg_configs[node_id]["wireguard_interfaces"]:
-            if "wireguard_interfaces" not in entry:
-                entry["wireguard_interfaces"] = wg_configs[node_id]["wireguard_interfaces"]
-            if "wireguard_ecmp_routes" not in entry:
-                entry["wireguard_ecmp_routes"] = wg_configs[node_id].get("wireguard_ecmp_routes", [])
-            entry.setdefault("node_class", "onprem")
-
-    inventory: dict = {
-        "all": {
-            "children": {
-                "cloud": {"hosts": cloud_hosts},
-            }
-        }
-    }
+    inventory: dict = {"all": {"children": {"cloud": {"hosts": cloud_hosts}}}}
     if onprem_hosts:
         inventory["all"]["children"]["onprem"] = {"hosts": onprem_hosts}
 

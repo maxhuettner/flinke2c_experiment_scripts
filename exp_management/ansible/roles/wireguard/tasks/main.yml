@@ -10,8 +10,8 @@
   tags: ['wireguard']
   block:
     - name: Install WireGuard packages
-      ansible.builtin.package:
-        name: "{{ wireguard_package_map.get(ansible_facts['distribution'], wireguard_package_map.get(ansible_facts['os_family'], 'wireguard')) }}"
+      ansible.builtin.apt:
+        name: "{{ wireguard_package_name | default('wireguard') }}"
         state: present
 
     # -----------------------------------------------------------------------
@@ -157,3 +157,47 @@
       loop: "{{ wireguard_interfaces }}"
       loop_control:
         loop_var: iface
+
+    # -----------------------------------------------------------------------
+    # MASQUERADE on cloud nodes: traffic arriving from on-prem via WireGuard
+    # and forwarded to cloud-only nodes (e.g. sink) over the VPC has its
+    # source IP rewritten to the cloud node's VPC address.  Without this the
+    # VPC-internal destination has no route back to the on-prem address and
+    # drops the reply.
+    # -----------------------------------------------------------------------
+    - name: Check MASQUERADE rule for traffic forwarded from WireGuard
+      ansible.builtin.command:
+        argv:
+          - iptables
+          - -t
+          - nat
+          - -C
+          - POSTROUTING
+          - "!"
+          - -o
+          - wg_+
+          - -j
+          - MASQUERADE
+      register: wg_masquerade_rule
+      when:
+        - node_class | default('') == 'cloud'
+      failed_when: wg_masquerade_rule.rc not in [0, 1]
+      changed_when: false
+
+    - name: Add MASQUERADE rule for traffic forwarded from WireGuard
+      ansible.builtin.command:
+        argv:
+          - iptables
+          - -t
+          - nat
+          - -A
+          - POSTROUTING
+          - "!"
+          - -o
+          - wg_+
+          - -j
+          - MASQUERADE
+      when:
+        - node_class | default('') == 'cloud'
+        - wg_masquerade_rule.rc == 1
+      changed_when: true

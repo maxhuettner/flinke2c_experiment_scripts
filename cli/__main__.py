@@ -183,6 +183,37 @@ def setup(topology_file: str) -> None:
     _run(["ansible-playbook", "playbooks/site.yml"], cwd=ANSIBLE_DIR)
 
 
+@main.command("gen-inventory")
+@click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
+def gen_inventory(topology_file: str) -> None:
+    """Regenerate the Ansible inventory from the topology and current Terraform outputs.
+
+    Use this after changing the topology file or onprem.yml without needing to
+    re-provision cloud infrastructure.  Requires Terraform state to be present
+    (i.e. 'setup' must have been run at least once).
+    """
+    graph = load_topology(topology_file)
+    outputs = _fetch_terraform_outputs()
+    instance_map: dict = outputs.get("instances", {}).get("value", {})
+
+    ansible_user = (
+        os.environ.get("ANSIBLE_CLOUD_SSH_USER")
+        or os.environ.get("CLOUD_SSH_USER")
+        or "ubuntu"
+    )
+    ansible_key = _load_ssh_key_path()
+
+    write_inventory(
+        graph=graph,
+        instance_map=instance_map,
+        ansible_user=ansible_user,
+        ansible_key=ansible_key,
+        output_path=ANSIBLE_INVENTORY,
+        onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
+    )
+    print(f"  wrote {ANSIBLE_INVENTORY}")
+
+
 @main.command()
 @click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
 def destroy(topology_file: str) -> None:

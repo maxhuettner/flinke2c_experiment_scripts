@@ -8,9 +8,13 @@ ListenPort = {{ iface.listen_port }}
 Table = off
 {% set up_cmds = [] %}
 {% set dn_cmds = [] %}
+{% set src_hint = '' %}
+{% if iface.node_address is defined and iface.node_address %}
+{% set src_hint = ' src ' + iface.node_address %}
+{% endif %}
 {% for peer in iface.peers | default([]) %}
 {% for ip in peer.direct_routes | default([]) %}
-{% if up_cmds.append('ip route replace ' + ip + ' dev %i') %}{% endif %}
+{% if up_cmds.append('ip route replace ' + ip + src_hint + ' dev %i') %}{% endif %}
 {% if dn_cmds.append('ip route del ' + ip + ' dev %i || true') %}{% endif %}
 {% endfor %}
 {% endfor %}

@@ -20,17 +20,23 @@ _DEFAULTS = dict(
     # and inter-node tunnels fail silently.
     wireguard_ingress_cidrs=["0.0.0.0/0"],
     wireguard_udp_port=51820,
+    wireguard_udp_port_max=51999,
     ssh_key_pair_name="network-sim-cli",
     default_instance_type="t3.micro",
 )
 
 
 def _infer_aws_subnet_for_ips(ips: list[ipaddress.IPv4Address]) -> Optional[ipaddress.IPv4Network]:
-    """Return the smallest AWS-valid subnet (/28.. /16) containing all IPs."""
+    """Return an AWS-valid subnet (/24.. /16) containing all IPs.
+
+    We intentionally avoid very small inferred subnets like /28 because
+    topology node addresses may use low host IPs (for example .15), which can
+    accidentally become the subnet broadcast address.
+    """
     if not ips:
         return None
     first = min(ips)
-    for prefix in range(28, 15, -1):
+    for prefix in range(24, 15, -1):
         network = ipaddress.IPv4Network((first, prefix), strict=False)
         if all(ip in network for ip in ips):
             return network
@@ -57,6 +63,7 @@ def build_tfvars(
     ssh_ingress_cidrs: Optional[list[str]] = None,
     wireguard_ingress_cidrs: Optional[list[str]] = None,
     wireguard_udp_port: int = _DEFAULTS["wireguard_udp_port"],
+    wireguard_udp_port_max: int = _DEFAULTS["wireguard_udp_port_max"],
     ssh_key_pair_name: str = _DEFAULTS["ssh_key_pair_name"],
     default_instance_type: str = _DEFAULTS["default_instance_type"],
 ) -> dict:
@@ -149,6 +156,7 @@ def build_tfvars(
         "ssh_ingress_cidrs": ssh_ingress_cidrs or _DEFAULTS["ssh_ingress_cidrs"],
         "wireguard_ingress_cidrs": wireguard_ingress_cidrs or _DEFAULTS["wireguard_ingress_cidrs"],
         "wireguard_udp_port": wireguard_udp_port,
+        "wireguard_udp_port_max": wireguard_udp_port_max,
         "ssh_key_pair_name": ssh_key_pair_name,
         "ec2_instances": instances,
     }

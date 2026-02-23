@@ -100,24 +100,34 @@ def _compute_next_hops(
 def _compute_all_nexthops(
     graph: nx.Graph,
     participants: list[str],
+    routing_graph: Optional[nx.Graph] = None,
 ) -> dict[str, dict[str, list[str]]]:
     """Return {source: {destination: [nexthop, ...]}} with all ECMP next-hops.
 
     Uses nx.all_shortest_paths so that destinations with multiple equal-cost
     paths contribute multiple next-hops, enabling kernel ECMP routes.
+
+    If *routing_graph* is provided it is used for path finding (so cloud-only
+    nodes reachable via VPC appear as destinations), while *graph* is still
+    used to determine which neighbours have direct WireGuard interfaces.  The
+    first hop of every path is restricted to direct WireGuard neighbours so
+    that AllowedIPs only references interfaces that actually exist.
     """
     sub = graph.subgraph(participants)
+    rg = routing_graph if routing_graph is not None else sub
+    all_dests = sorted(rg.nodes())
     tables: dict[str, dict[str, list[str]]] = {}
     for src in participants:
+        wg_nbrs = set(sub.neighbors(src))
         routes: dict[str, list[str]] = {}
-        for dest in participants:
+        for dest in all_dests:
             if dest == src:
                 continue
             try:
-                paths = list(nx.all_shortest_paths(sub, src, dest))
+                paths = list(nx.all_shortest_paths(rg, src, dest))
             except nx.NetworkXNoPath:
                 continue
-            nexthops = sorted({p[1] for p in paths if len(p) >= 2})
+            nexthops = sorted({p[1] for p in paths if len(p) >= 2 and p[1] in wg_nbrs})
             if nexthops:
                 routes[dest] = nexthops
         tables[src] = routes
@@ -196,6 +206,119 @@ def build_wireguard_config(
     return result
 
 
+def _ensure_cidr(ip: str) -> str:
+    return ip if "/" in ip else f"{ip}/32"
+
+
+def _build_route_map(
+    nodes: list[str],
+    graph: nx.Graph,
+    route_address_map: Optional[dict[str, str]],
+) -> dict[str, str]:
+    """Build IP map for *nodes*, using *route_address_map* when provided.
+
+    *nodes* may include cloud-only nodes (e.g. a sink with no WireGuard
+    interfaces) so their addresses appear in AllowedIPs for on-prem peers
+    that can reach them transitively via VPC through a cloud neighbour.
+    """
+    if route_address_map is None:
+        return {nid: f"{graph.nodes[nid]['data'].address}/32" for nid in nodes if nid in graph}
+    return {
+        nid: _ensure_cidr(route_address_map[nid])
+        for nid in nodes
+        if nid in route_address_map
+    }
+
+
+def _build_iface_map(
+    participants: list[str],
+    route_map: dict[str, str],
+    interface_address_map: Optional[dict[str, str]],
+) -> dict[str, str]:
+    if interface_address_map is None:
+        return {nid: route_map[nid] for nid in participants if nid in route_map}
+    return {
+        nid: _ensure_cidr(interface_address_map.get(nid, route_map[nid]))
+        for nid in participants
+    }
+
+
+def _peer_endpoint(
+    src: str,
+    nbr: str,
+    port: int,
+    host_public_ips: dict[str, str],
+    on_prem_nodes: Optional[set[str]],
+) -> Optional[str]:
+    """Return the WireGuard endpoint for *nbr* as seen from *src*, or None.
+
+    Cloud → on-prem: None (cloud cannot reach on-prem behind NAT; on-prem
+    initiates and the cloud side learns the endpoint from the first handshake).
+    All other combinations (on-prem→cloud, on-prem→on-prem) get an endpoint.
+    """
+    src_is_cloud = on_prem_nodes is None or src not in on_prem_nodes
+    nbr_is_on_prem = on_prem_nodes is not None and nbr in on_prem_nodes
+    if src_is_cloud and nbr_is_on_prem:
+        return None
+    return f"{host_public_ips[nbr]}:{port}"
+
+
+def _peer_allowed_ips(
+    nbr: str,
+    nbr_route_ip: str,
+    routes: dict[str, list[str]],
+    route_map: dict[str, str],
+    nbr_iface_ip: Optional[str] = None,
+) -> list[str]:
+    """AllowedIPs: neighbor's own IPs + every destination where nbr is a nexthop.
+
+    *nbr_iface_ip* is the WireGuard interface address of the neighbor (may
+    differ from its topology/routing address on cloud nodes).  Including it
+    ensures packets sourced from that interface address are accepted when the
+    neighbor initiates traffic.
+    """
+    allowed: set[str] = {nbr_route_ip}
+    if nbr_iface_ip and nbr_iface_ip != nbr_route_ip:
+        allowed.add(nbr_iface_ip)
+    for dest, nexthops in routes.items():
+        if nbr in nexthops:
+            dest_ip = route_map[dest].split("/")[0] + "/32"
+            allowed.add(dest_ip)
+    return sorted(allowed)
+
+
+def _peer_direct_routes(
+    nbr: str,
+    nbr_route_ip: str,
+    routes: dict[str, list[str]],
+    route_map: dict[str, str],
+) -> list[str]:
+    """Direct routes: neighbor's IP + destinations exclusively reached via this neighbor."""
+    direct = [nbr_route_ip]
+    for dest, nexthops in sorted(routes.items()):
+        if nexthops == [nbr]:
+            dest_ip = route_map[dest].split("/")[0] + "/32"
+            if dest_ip != nbr_route_ip:
+                direct.append(dest_ip)
+    return direct
+
+
+def _ecmp_route_commands(
+    routes: dict[str, list[str]],
+    route_map: dict[str, str],
+    src_address: Optional[str] = None,
+) -> list[str]:
+    """ECMP ip-route commands for destinations with multiple equal-cost next-hops."""
+    commands = []
+    src_hint = f" src {src_address}" if src_address else ""
+    for dest, nexthops in sorted(routes.items()):
+        if len(nexthops) > 1:
+            nexthop_args = " ".join(f"nexthop dev wg_{nh}" for nh in nexthops)
+            dest_ip = route_map[dest].split("/")[0] + "/32"
+            commands.append(f"ip route replace {dest_ip}{src_hint} {nexthop_args}")
+    return commands
+
+
 def build_wireguard_ecmp_config(
     graph: nx.Graph,
     host_public_ips: dict[str, str],
@@ -204,6 +327,8 @@ def build_wireguard_ecmp_config(
     salt: str = DEFAULT_KEY_SALT,
     route_address_map: Optional[dict[str, str]] = None,
     interface_address_map: Optional[dict[str, str]] = None,
+    on_prem_nodes: Optional[set[str]] = None,
+    routing_graph: Optional[nx.Graph] = None,
 ) -> dict[str, dict]:
     """Return per-node ECMP WireGuard config with one interface per direct neighbor.
 
@@ -217,6 +342,12 @@ def build_wireguard_ecmp_config(
     a direct ``ip route replace`` in PostUp; destinations with multiple equal-cost
     next-hops get a multi-nexthop ECMP route installed by a separate service.
 
+    *routing_graph* may be the full topology graph (including cloud-only edges
+    that are not in *graph*).  When provided, nexthop computation considers
+    paths through those extra edges so that cloud-only nodes (e.g. a sink with
+    no WireGuard interfaces) still appear in AllowedIPs for on-prem peers that
+    can reach them transitively via a cloud gateway node over the VPC.
+
     Port assignment
     ---------------
     Each undirected edge in the graph gets a unique UDP port starting at
@@ -229,107 +360,63 @@ def build_wireguard_ecmp_config(
     ``edge_{min}_{max}_{node}`` so that per-interface keys are independent.
     """
     participants = sorted(
-        nid for nid in (node_ids or list(graph.nodes())) if nid in host_public_ips
+        nid for nid in (node_ids or list(graph.nodes()))
+        if nid in host_public_ips or (on_prem_nodes and nid in on_prem_nodes)
     )
     sub = graph.subgraph(participants)
 
-    # Routed destination addresses (AllowedIPs / ip route targets).
-    if route_address_map is None:
-        route_map = {
-            nid: f"{graph.nodes[nid]['data'].address}/32"
-            for nid in participants
-        }
-    else:
-        route_map = {
-            nid: route_address_map.get(nid, graph.nodes[nid]["data"].address)
-            for nid in participants
-        }
-        route_map = {
-            nid: ip if "/" in ip else f"{ip}/32"
-            for nid, ip in route_map.items()
-        }
+    # route_map covers WG participants *and* any routing-graph-only nodes so
+    # that cloud-only destinations (e.g. snk) appear in AllowedIPs.
+    rg = routing_graph if routing_graph is not None else graph
+    routing_nodes = sorted(set(participants) | set(rg.nodes()))
+    route_map = _build_route_map(routing_nodes, rg, route_address_map)
+    iface_map = _build_iface_map(participants, route_map, interface_address_map)
 
-    # Interface addresses can differ from routed destination addresses to avoid
-    # conflicts with existing host NIC IPs (for example EC2 private IPs).
-    if interface_address_map is None:
-        iface_map = route_map
-    else:
-        iface_map = {
-            nid: interface_address_map.get(nid, route_map[nid])
-            for nid in participants
-        }
-        iface_map = {
-            nid: ip if "/" in ip else f"{ip}/32"
-            for nid, ip in iface_map.items()
-        }
-
-    # One port per undirected edge, sorted for stable assignment.
     edges = sorted({(min(u, v), max(u, v)) for u, v in sub.edges()})
     edge_ports = {edge: listen_port + i for i, edge in enumerate(edges)}
-
-    # One keypair per edge-endpoint: (edge, node) → (priv_b64, pub_b64).
-    edge_keys: dict[tuple[str, str], dict[str, tuple[str, str]]] = {}
-    for (u, v) in edges:
-        edge_keys[(u, v)] = {
+    edge_keys: dict[tuple[str, str], dict[str, tuple[str, str]]] = {
+        (u, v): {
             u: _generate_keypair(f"edge_{u}_{v}_{u}", salt),
             v: _generate_keypair(f"edge_{u}_{v}_{v}", salt),
         }
-
-    all_nexthops = _compute_all_nexthops(graph, participants)
+        for (u, v) in edges
+    }
+    all_nexthops = _compute_all_nexthops(graph, participants, routing_graph=rg)
 
     result: dict[str, dict] = {}
     for src in participants:
         routes = all_nexthops.get(src, {})
-        direct_neighbors = sorted(sub.neighbors(src))
-
+        src_address = route_map[src].split("/")[0] if src in route_map else None
         interfaces = []
-        for nbr in direct_neighbors:
+        for nbr in sorted(sub.neighbors(src)):
             edge_key = (min(src, nbr), max(src, nbr))
             port = edge_ports[edge_key]
-            iface_name = f"wg_{nbr}"
-
             nbr_route_ip = route_map[nbr].split("/")[0] + "/32"
-
-            # AllowedIPs: neighbor's own WG IP + every dest where nbr is a valid nexthop.
-            allowed: set[str] = {nbr_route_ip}
-            for dest, nexthops in routes.items():
-                if nbr in nexthops:
-                    allowed.add(route_map[dest].split("/")[0] + "/32")
-
-            # Direct routes for PostUp: neighbor's own IP + dests exclusively via this nbr.
-            direct: list[str] = [nbr_route_ip]
-            for dest, nexthops in sorted(routes.items()):
-                if nexthops == [nbr]:
-                    dest_ip = route_map[dest].split("/")[0] + "/32"
-                    if dest_ip != nbr_route_ip:
-                        direct.append(dest_ip)
-
+            nbr_iface_ip = iface_map[nbr].split("/")[0] + "/32" if nbr in iface_map else None
+            peer: dict = {
+                "public_key": edge_keys[edge_key][nbr][1],
+                "allowed_ips": _peer_allowed_ips(nbr, nbr_route_ip, routes, route_map, nbr_iface_ip),
+                "persistent_keepalive": 25,
+                "direct_routes": _peer_direct_routes(nbr, nbr_route_ip, routes, route_map),
+            }
+            endpoint = _peer_endpoint(src, nbr, port, host_public_ips, on_prem_nodes)
+            if endpoint is not None:
+                peer["endpoint"] = endpoint
             interfaces.append({
-                "interface": iface_name,
+                "interface": f"wg_{nbr}",
                 "listen_port": port,
                 "private_key": edge_keys[edge_key][src][0],
                 "address": iface_map[src],
+                "node_address": src_address,
                 "speed": sub[src][nbr].get("speed"),
-                "peers": [{
-                    "public_key": edge_keys[edge_key][nbr][1],
-                    "endpoint": f"{host_public_ips[nbr]}:{port}",
-                    "allowed_ips": sorted(allowed),
-                    "persistent_keepalive": 25,
-                    "direct_routes": sorted(direct),
-                }],
+                "peers": [peer],
             })
-
-        # ECMP routes: destinations reached via more than one equal-cost next-hop.
-        ecmp_routes: list[str] = []
-        for dest, nexthops in sorted(routes.items()):
-            if len(nexthops) > 1:
-                nexthop_args = " ".join(f"nexthop dev wg_{nh}" for nh in nexthops)
-                dest_ip = route_map[dest].split("/")[0] + "/32"
-                ecmp_routes.append(f"ip route replace {dest_ip} {nexthop_args}")
-
         result[src] = {
             "wireguard_interfaces": interfaces,
-            "wireguard_ecmp_routes": ecmp_routes,
+            "wireguard_ecmp_routes": _ecmp_route_commands(
+                routes,
+                route_map,
+                src_address=src_address,
+            ),
         }
-
     return result

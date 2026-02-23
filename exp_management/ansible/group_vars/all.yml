@@ -11,6 +11,13 @@ common_cloud_packages:
   - awscli
 common_onprem_packages: []
 
+# Ubuntu is used across cloud and on-prem nodes in this project.
+docker_package_name: docker.io
+wireguard_package_name: wireguard
+
+# Apt metadata refresh can take tens of seconds; keep reruns fast by default.
+common_refresh_apt_cache: false
+
 docker_package_map:
   Debian: docker.io
   Ubuntu: docker.io
@@ -26,6 +33,9 @@ docker_images_by_node_type:
   compute:
     - maxhue/flinke2c
     - maxhue/nes-worker
+
+# Pull only missing images by default; pruning can be very slow on cloud nodes.
+docker_prune_before_pull: false
 
 wireguard_package_map:
   Debian: wireguard

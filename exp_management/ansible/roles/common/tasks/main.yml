@@ -1,40 +1,54 @@
 - name: Refresh apt cache
   ansible.builtin.apt:
     update_cache: true
-    cache_valid_time: 3600
+    cache_valid_time: 86400
     lock_timeout: 300
-  when: ansible_facts["os_family"] == "Debian"
+  when: common_refresh_apt_cache | default(false) | bool
 
 - name: Install base packages
-  ansible.builtin.package:
+  ansible.builtin.apt:
     name: "{{ common_base_packages }}"
     state: present
+    update_cache: true
+    cache_valid_time: 86400
+    lock_timeout: 300
   when: common_base_packages | length > 0
 
+- name: Check Docker CLI availability
+  ansible.builtin.command: docker --version
+  register: docker_check_initial
+  failed_when: false
+  changed_when: false
+
 - name: Install Docker engine
-  ansible.builtin.package:
-    name: "{{ docker_package_map.get(ansible_facts['distribution'], docker_package_map.get(ansible_facts['os_family'], 'docker.io')) }}"
+  ansible.builtin.apt:
+    name: "{{ docker_package_name | default('docker.io') }}"
     state: present
+  register: docker_install_result
   when:
     - node_class is defined
     - node_class == 'cloud'
+    - docker_check_initial.rc != 0
 
-- name: Check Docker CLI availability
+- name: Ensure Docker service is enabled on cloud nodes
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - docker_check_initial.rc == 0 or (docker_install_result is defined and docker_install_result is changed)
+
+- name: Re-check Docker CLI availability
   ansible.builtin.command: docker --version
   register: docker_check
   failed_when: false
   changed_when: false
 
-- name: Ensure Docker service is enabled when Docker is present
-  ansible.builtin.service:
-    name: docker
-    state: started
-    enabled: true
-  when: docker_check.rc == 0
-
 - name: Add ansible user to docker group
   ansible.builtin.user:
-    name: "{{ ansible_user }}"
+    name: "{{ ansible_user | default('mhuttner') }}"
     groups: docker
     append: true
   when: docker_check.rc == 0
@@ -64,18 +78,44 @@
   when:
     - docker_images_to_pull | length > 0
     - docker_check.rc == 0
+    - docker_prune_before_pull | default(false)
 
-- name: Pre-pull node-specific Docker images
-  ansible.builtin.command: "docker pull {{ image }}"
+- name: Check which node-specific Docker images are already present
+  ansible.builtin.command: "docker image inspect {{ image }}"
   loop: "{{ docker_images_to_pull }}"
   loop_control:
     loop_var: image
+  register: docker_image_inspect_results
+  failed_when: false
+  changed_when: false
   when:
     - docker_images_to_pull | length > 0
     - docker_check.rc == 0
 
+- name: Build list of missing Docker images
+  ansible.builtin.set_fact:
+    docker_images_missing: >-
+      {{
+        (docker_image_inspect_results.results | default([]))
+        | rejectattr('rc', 'equalto', 0)
+        | map(attribute='image')
+        | list
+      }}
+  when:
+    - docker_images_to_pull | length > 0
+    - docker_check.rc == 0
+
+- name: Pre-pull missing node-specific Docker images
+  ansible.builtin.command: "docker pull {{ image }}"
+  loop: "{{ docker_images_missing | default([]) }}"
+  loop_control:
+    loop_var: image
+  when:
+    - (docker_images_missing | default([])) | length > 0
+    - docker_check.rc == 0
+
 - name: Install cloud specific packages
-  ansible.builtin.package:
+  ansible.builtin.apt:
     name: "{{ common_cloud_packages }}"
     state: present
   when:
@@ -84,7 +124,7 @@
     - common_cloud_packages | length > 0
 
 - name: Install on-prem specific packages
-  ansible.builtin.package:
+  ansible.builtin.apt:
     name: "{{ common_onprem_packages }}"
     state: present
   when:

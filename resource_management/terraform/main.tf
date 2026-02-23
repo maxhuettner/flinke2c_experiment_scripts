@@ -123,7 +123,7 @@ resource "aws_security_group_rule" "wireguard_ingress" {
   security_group_id = aws_security_group.experiment.id
   protocol          = "udp"
   from_port         = var.wireguard_udp_port
-  to_port           = var.wireguard_udp_port
+  to_port           = var.wireguard_udp_port_max
   cidr_blocks       = [each.value]
 }
 

@@ -2,8 +2,9 @@
 Description=WireGuard ECMP Routes
 # Must start after every wg-quick interface so the nexthop devices are present.
 # PartOf= ensures this service is restarted whenever any wg-quick interface restarts.
-After=network.target {% for iface in wireguard_interfaces %}wg-quick@{{ iface.interface }}.service {% endfor %}
-PartOf={% for iface in wireguard_interfaces %}wg-quick@{{ iface.interface }}.service {% endfor %}
+{% set wg_units = wireguard_interfaces | map(attribute='interface') | map('regex_replace', '^(.*)$', 'wg-quick@\\1.service') | list %}
+After=network.target {{ wg_units | join(' ') }}
+PartOf={{ wg_units | join(' ') }}
 
 [Service]
 Type=oneshot
