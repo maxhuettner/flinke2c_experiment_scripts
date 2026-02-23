@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
+import re
 import shutil
 import sys
 import time
@@ -937,6 +938,13 @@ def generate_graphml(
     return '\n'.join(lines) + '\n'
 
 
+def _rewrite_graphml_slots(graphml_content: str, task_slots: int) -> tuple[str, int]:
+    """Rewrite all GraphML <data key="slots"> values to task_slots."""
+    pattern = re.compile(r'(<data\s+key="slots"\s*>\s*)\d+(\s*</data>)')
+    rewritten, count = pattern.subn(rf"\g<1>{task_slots}\g<2>", graphml_content)
+    return rewritten, count
+
+
 # ── Per-experiment logic ───────────────────────────────────────────────────────
 
 async def _run_flink_repetition(
@@ -1026,8 +1034,12 @@ async def _run_flink_experiment(
             static_path = CONFIGS_DIR / "coordinator" / f"{topo_stem}.graphml"
         if static_path.exists():
             graphml_content  = static_path.read_text()
+            graphml_content, slot_updates = _rewrite_graphml_slots(graphml_content, task_slots)
             graphml_filename = static_path.name
-            print(f"  Using static graphml: {static_path}")
+            print(
+                f"  Using static graphml: {static_path} "
+                f"(set {slot_updates} slot entry/entries to {task_slots})"
+            )
         else:
             graphml_content  = generate_graphml(graph, src.id, snk.id, task_slots)
             graphml_filename = "topology.graphml"
