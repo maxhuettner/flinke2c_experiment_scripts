@@ -140,6 +140,17 @@ def load_nodes(topology_file: str) -> dict[str, NodeInfo]:
     for nid, attrs in graph.nodes(data=True):
         topo: TopoNode = attrs["data"]
         iv = all_hosts.get(nid, {})
+
+        # On-prem topology ids (e.g. N3/src) map to inventory hostnames via
+        # the topology's "on-prem-id" field (e.g. zs01/zs04).
+        if not iv and topo.is_on_prem():
+            onprem_id = (
+                topo.extra.get("on-prem-id")
+                or topo.extra.get("on_prem_id")
+            )
+            if onprem_id:
+                iv = all_hosts.get(str(onprem_id), {})
+
         nodes[nid] = NodeInfo(
             id=nid,
             host=iv.get("ansible_host", topo.address),
