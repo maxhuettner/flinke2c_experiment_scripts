@@ -13,7 +13,8 @@
 # Runs after Restart WireGuard (definition order) so that the nexthop devices
 # are present before the ECMP ip-route commands execute.
 - name: Restart ECMP routes
-  ansible.builtin.service:
+  ansible.builtin.systemd:
     name: wg-ecmp-routes
     state: restarted
+    daemon_reload: true
   when: wireguard_ecmp_routes | default([]) | length > 0

@@ -127,10 +127,11 @@
       notify: Restart ECMP routes
 
     - name: Enable and start ECMP routes service
-      ansible.builtin.service:
+      ansible.builtin.systemd:
         name: wg-ecmp-routes
         enabled: true
         state: started
+        daemon_reload: true
       when: wireguard_ecmp_routes | default([]) | length > 0
 
     # -----------------------------------------------------------------------

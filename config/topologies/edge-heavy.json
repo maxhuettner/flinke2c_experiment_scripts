@@ -3,10 +3,10 @@
     { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "c6g.large", "node_type": "sink"},
     { "id": "N1", "address": "10.10.0.11", "cloud_instance_type": "c6g.large", "node_type": "compute"},
     { "id": "N2", "address": "10.10.0.12", "node_type": "compute", "on-prem-id": "zs01", "location": "on-prem", "speed": "50"},
-    { "id": "N3", "address": "10.10.0.13", "node_type": "compute", "on-prem-id": "zs01", "location": "on-prem", "speed": "50" },
-    { "id": "N4", "address": "10.10.0.14", "node_type": "compute", "on-prem-id": "zs02", "location": "on-prem", "speed": "40" },
-    { "id": "N5", "address": "10.10.0.15", "node_type": "compute", "on-prem-id": "zs03", "location": "on-prem", "speed": "30" },
-    { "id": "src", "address": "10.10.0.16", "on-prem-id": "zs04", "location": "on-prem", "node_type": "source" }
+    { "id": "N3", "address": "10.10.0.13", "node_type": "compute", "on-prem-id": "zs02", "location": "on-prem", "speed": "50" },
+    { "id": "N4", "address": "10.10.0.14", "node_type": "compute", "on-prem-id": "zs03", "location": "on-prem", "speed": "40" },
+    { "id": "N5", "address": "10.10.0.15", "node_type": "compute", "on-prem-id": "zs04", "location": "on-prem", "speed": "30" },
+    { "id": "src", "address": "10.10.0.16", "on-prem-id": "zs05", "location": "on-prem", "node_type": "source" }
   ],
   "edges": [
     {
@@ -35,10 +35,6 @@
     {
       "source": "N3",
       "target": "N1"
-    },
-    {
-      "source": "N4",
-      "target": "N2"
     },
     {
       "source": "N1",

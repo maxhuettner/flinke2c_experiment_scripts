@@ -23,3 +23,8 @@ all:
           ansible_host: 10.0.21.84
           wireguard_endpoint: 10.0.21.84
           ansible_user: ubuntu
+
+        zs05:
+          ansible_host: 10.0.21.85
+          wireguard_endpoint: 10.0.21.85
+          ansible_user: ubuntu
