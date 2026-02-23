@@ -2,6 +2,7 @@
 PrivateKey = {{ iface.private_key }}
 Address = {{ iface.address }}
 ListenPort = {{ iface.listen_port }}
+MTU = {{ iface.mtu | default(wireguard_default_mtu | default(1420)) }}
 # Table=off: disable wg-quick's iptables/fwmark management entirely.
 # It calls iptables-restore internally even without PostUp hooks, which hangs
 # on fresh Ubuntu 22.04 EC2 instances.  Routes are managed via ip-route below.

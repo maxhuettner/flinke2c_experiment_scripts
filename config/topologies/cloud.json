@@ -1,12 +1,12 @@
 {
   "nodes": [
-    { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "t4g.medium", "node_type": "sink"},
-    { "id": "N1", "address": "10.10.0.11", "cloud_instance_type": "t4g.medium", "node_type": "compute"},
-    { "id": "N2", "address": "10.10.0.12", "cloud_instance_type": "t4g.medium", "node_type": "compute"},
-    { "id": "N3", "address": "10.10.0.13", "cloud_instance_type": "t4g.medium", "node_type": "compute"},
-    { "id": "N4", "address": "10.10.0.14", "cloud_instance_type": "t4g.medium", "node_type": "compute" },
-    { "id": "N5", "address": "10.10.0.17", "cloud_instance_type": "t4g.medium", "node_type": "compute" },
-    { "id": "src", "address": "10.10.0.16", "cloud_instance_type": "t4g.medium", "node_type": "source" }
+    { "id": "snk", "address": "10.10.0.10", "cloud_instance_type": "c6g.medium", "node_type": "sink"},
+    { "id": "N1", "address": "10.10.0.11", "cloud_instance_type": "c7g.medium", "node_type": "compute"},
+    { "id": "N2", "address": "10.10.0.12", "cloud_instance_type": "c7g.medium", "node_type": "compute"},
+    { "id": "N3", "address": "10.10.0.13", "cloud_instance_type": "c7g.medium", "node_type": "compute"},
+    { "id": "N4", "address": "10.10.0.14", "cloud_instance_type": "c7g.medium", "node_type": "compute" },
+    { "id": "N5", "address": "10.10.0.17", "cloud_instance_type": "c7g.medium", "node_type": "compute" },
+    { "id": "src", "address": "10.10.0.16", "cloud_instance_type": "c6g.medium", "node_type": "source" }
   ],
   "edges": []
 }

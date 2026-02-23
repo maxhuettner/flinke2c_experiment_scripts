@@ -44,3 +44,6 @@ wireguard_package_map:
 
 wireguard_interface: wg0
 wireguard_default_listen_port: 51820
+# Auto-MTU on EC2 ENA (9001) can pick very large WireGuard MTUs and cause
+# PMTU blackholes across internet/NAT paths. Use a conservative default.
+wireguard_default_mtu: 1420
