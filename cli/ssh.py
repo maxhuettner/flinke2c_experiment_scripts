@@ -51,6 +51,17 @@ async def run_command(
         "username": username,
         "client_keys": [_expand(key_path)],
         "known_hosts": None,   # skip host-key verification for lab environments
+        "config": [],
+        # Keep auth path deterministic and fast (like ssh -i ... -o IdentitiesOnly=yes)
+        "agent_path": None,
+        "preferred_auth": ["publickey"],
+        "public_key_auth": True,
+        "kbdint_auth": False,
+        "password_auth": False,
+        "gss_kex": False,
+        "gss_auth": False,
+        "connect_timeout": 10,
+        "login_timeout": 15,
     }
     if passphrase:
         conn_kwargs["passphrase"] = passphrase

@@ -68,7 +68,7 @@ DONE_SIGNAL  = "All connections closed, stopping logger"
 POLL_INTERVAL  = 3     # seconds between docker-logs polls
 READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
-CLUSTER_WARMUP = 8     # seconds for Flink cluster to form after starting
+FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -170,7 +170,19 @@ def _conn_kwargs(node: NodeInfo, key_path: str, passphrase: Optional[str]) -> di
         "username": node.user,
         "client_keys": [_expand(key_path)],
         "known_hosts": None,
+        "config": [],
         "keepalive_interval": 30,
+        # Match fast manual SSH behavior: use only the configured private key
+        # and skip slower auth fallbacks.
+        "agent_path": None,
+        "preferred_auth": ["publickey"],
+        "public_key_auth": True,
+        "kbdint_auth": False,
+        "password_auth": False,
+        "gss_kex": False,
+        "gss_auth": False,
+        "connect_timeout": 10,
+        "login_timeout": 15,
     }
     if passphrase:
         kw["passphrase"] = passphrase
@@ -417,6 +429,59 @@ async def _wait_both_done(
                           label=f"src/{bid_name}", since=since),
         _poll_for_pattern(snk_conn, sink_name, DONE_SIGNAL, timeout,
                           label=f"sink/{sink_name}", since=since),
+    )
+
+
+async def _wait_flink_taskmanagers_ready(
+    snk_conn: asyncssh.SSHClientConnection,
+    jm_name: str,
+    expected_count: int,
+    timeout: float = FLINK_CLUSTER_READY_TIMEOUT,
+) -> None:
+    """Wait until Flink REST reports all expected taskmanagers."""
+    if expected_count <= 0:
+        return
+
+    deadline = time.monotonic() + timeout
+    last_seen = -1
+    while time.monotonic() < deadline:
+        # Fail fast if the JM crashed before the cluster formed.
+        jm_status = await snk_conn.run(
+            f"docker inspect --format={{{{.State.Status}}}} {jm_name} 2>&1",
+            check=False,
+        )
+        status = (jm_status.stdout or "").strip()
+        if status and status != "running":
+            jm_logs = await snk_conn.run(f"docker logs {jm_name} 2>&1", check=False)
+            logs = (jm_logs.stdout or jm_logs.stderr or "(no output)").strip()
+            raise RuntimeError(
+                f"Flink jobmanager '{jm_name}' is not running (status: {status!r}).\n"
+                f"Logs:\n{logs}"
+            )
+
+        # Query TM registrations from Flink REST.
+        rest = await snk_conn.run(
+            "curl -fsS http://127.0.0.1:8081/taskmanagers",
+            check=False,
+        )
+        if rest.exit_status == 0 and rest.stdout:
+            try:
+                payload = _json.loads(rest.stdout)
+            except _json.JSONDecodeError:
+                payload = {}
+            tms = payload.get("taskmanagers") if isinstance(payload, dict) else []
+            seen = len(tms) if isinstance(tms, list) else 0
+            if seen != last_seen:
+                print(f"  Flink REST taskmanagers: {seen}/{expected_count}")
+                last_seen = seen
+            if seen >= expected_count:
+                return
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink taskmanagers "
+        f"({expected_count} expected, last seen {max(last_seen, 0)})."
     )
 
 
@@ -970,7 +1035,7 @@ async def _run_flink_experiment(
     ])))
 
     print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
-    for wn in worker_nodes:
+    async def _start_taskmanager(wn: NodeInfo) -> None:
         wh = worker_homes[wn.id]
         tm_lib_mounts = " ".join(
             f"-v {wh}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
@@ -985,14 +1050,22 @@ async def _run_flink_experiment(
             FLINK_IMAGE,
             "taskmanager",
         ])))
+        await _assert_running(worker_conns[wn.id], tm_names[wn.id])
 
-    # Wait for sources to finish loading, then for the cluster to form
+    await asyncio.gather(*(_start_taskmanager(wn) for wn in worker_nodes))
+
+    # Wait for sources to finish loading and for the cluster to form
     print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
     await _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
                             timeout=READY_TIMEOUT, label=bid_name)
     print("  Source is ready.")
-    print(f"  Waiting {CLUSTER_WARMUP}s for cluster to form...")
-    await asyncio.sleep(CLUSTER_WARMUP)
+    print(f"  Waiting for Flink REST to report {len(worker_nodes)} taskmanager(s)...")
+    await _wait_flink_taskmanagers_ready(
+        snk_conn=snk_conn,
+        jm_name=jm_name,
+        expected_count=len(worker_nodes),
+    )
+    print("  Flink cluster is ready.")
 
     worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
 
@@ -1174,7 +1247,7 @@ async def _run_nes_experiment(
 
     # Start NES workers on compute nodes
     print(f"  Starting {len(worker_nodes)} NES worker(s)...")
-    for wn in worker_nodes:
+    async def _start_nes_worker(wn: NodeInfo) -> None:
         wh = worker_homes[wn.id]
         await _run(worker_conns[wn.id], " ".join(filter(None, [
             "docker run -d --init --network=host",
@@ -1184,6 +1257,7 @@ async def _run_nes_experiment(
             NES_WORKER_IMAGE,
         ])))
         await _assert_running(worker_conns[wn.id], wn_names[wn.id])
+    await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
 
     print(f"  Waiting {NES_WARMUP}s for NES cluster to form...")
     await asyncio.sleep(NES_WARMUP)
