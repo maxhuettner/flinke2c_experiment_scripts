@@ -1,8 +1,8 @@
-experiments:
-  - name: flink_q1_e2c
-    system: flink
-    query: q1
-    repetitions: 2
+# experiments:
+#   - name: flink_q1_e2c
+#     system: flink
+#     query: q1
+#     repetitions: 2
 
   # - name: flink_q4_e2c
   #   system: flink

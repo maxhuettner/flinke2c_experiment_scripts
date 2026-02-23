@@ -5,6 +5,21 @@
     lock_timeout: 300
   when: common_refresh_apt_cache | default(false) | bool
 
+- name: Read local short hostname
+  ansible.builtin.command: hostname -s
+  register: common_short_hostname
+  changed_when: false
+
+- name: Ensure local hostname resolves via /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "^127\\.0\\.1\\.1\\s+"
+    line: "127.0.1.1 {{ common_short_hostname.stdout }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Install base packages
   ansible.builtin.apt:
     name: "{{ common_base_packages }}"

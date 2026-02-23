@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import os
 import shutil
 import sys
 import time
@@ -60,7 +61,7 @@ NES_QUERIES_DIR       = Path("exp_management/queries/nes")
 NES_COORDINATOR_IMAGE = "maxhue/nes-coordinator"
 NES_WORKER_IMAGE      = "maxhue/nes-worker"
 NES_REST_PORT         = 8081
-NES_WARMUP            = 10   # seconds for NES cluster to form
+NES_CLUSTER_READY_TIMEOUT = 120  # seconds to wait for NES topology workers
 
 READY_SIGNAL = "Reading & binary encoding done"
 DONE_SIGNAL  = "All connections closed, stopping logger"
@@ -69,6 +70,9 @@ POLL_INTERVAL  = 3     # seconds between docker-logs polls
 READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
 FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
+TRACE_REMOTE_TIMINGS = (
+    os.getenv("SIM_TRACE_REMOTE_TIMINGS", "").strip().lower() in ("1", "true", "yes")
+)
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -190,7 +194,25 @@ def _conn_kwargs(node: NodeInfo, key_path: str, passphrase: Optional[str]) -> di
 
 
 async def _run(conn: asyncssh.SSHClientConnection, cmd: str, *, check: bool = True) -> str:
+    started = time.monotonic()
     result = await conn.run(cmd, check=False)
+    if TRACE_REMOTE_TIMINGS:
+        elapsed = time.monotonic() - started
+        peer = conn.get_extra_info("peername")
+        host = peer[0] if isinstance(peer, tuple) and peer else "unknown"
+        short_cmd = " ".join(cmd.split())
+        if len(short_cmd) > 140:
+            short_cmd = short_cmd[:137] + "..."
+        stderr_snip = ""
+        if result.stderr:
+            err = " ".join(result.stderr.strip().split())
+            if len(err) > 100:
+                err = err[:97] + "..."
+            stderr_snip = f" stderr='{err}'"
+        print(
+            f"  [timing host={host} status={result.exit_status} t={elapsed:.2f}s{stderr_snip}] "
+            f"{short_cmd}"
+        )
     if check and result.exit_status != 0:
         raise RuntimeError(
             f"Remote command failed (exit {result.exit_status}): {cmd!r}\n"
@@ -432,6 +454,23 @@ async def _wait_both_done(
     )
 
 
+async def _clear_remote_path(conn: asyncssh.SSHClientConnection, path: str) -> None:
+    """Clear a remote path, avoiding sudo unless strictly required."""
+    # Fast path: clear as the SSH user.
+    rm_result = await conn.run(f"rm -rf {path}", check=False)
+    if rm_result.exit_status == 0:
+        return
+
+    # Fallback: clear as root for root-owned trees.
+    sudo_result = await conn.run(f"sudo -n rm -rf {path}", check=False)
+    if sudo_result.exit_status != 0:
+        raise RuntimeError(
+            f"Failed to clear remote path {path!r}.\n"
+            f"rm stderr: {(rm_result.stderr or '').strip()}\n"
+            f"sudo rm stderr: {(sudo_result.stderr or '').strip()}"
+        )
+
+
 async def _wait_flink_taskmanagers_ready(
     snk_conn: asyncssh.SSHClientConnection,
     jm_name: str,
@@ -481,6 +520,64 @@ async def _wait_flink_taskmanagers_ready(
 
     raise TimeoutError(
         f"Timed out after {timeout:.0f}s waiting for Flink taskmanagers "
+        f"({expected_count} expected, last seen {max(last_seen, 0)})."
+    )
+
+
+async def _wait_nes_topology_workers_ready(
+    snk_conn: asyncssh.SSHClientConnection,
+    nes_name: str,
+    expected_count: int,
+    timeout: float = NES_CLUSTER_READY_TIMEOUT,
+) -> None:
+    """Wait until NES topology REST reports all worker nodes.
+
+    expected_count includes the coordinator-local worker.
+    """
+    if expected_count <= 0:
+        return
+
+    deadline = time.monotonic() + timeout
+    last_seen = -1
+    topology_cmd = (
+        f"for p in /v1/nes/topology /nes/topology; do "
+        f"curl -fsS http://127.0.0.1:{NES_REST_PORT}$p && exit 0; "
+        "done; exit 1"
+    )
+
+    while time.monotonic() < deadline:
+        # Fail fast if the coordinator crashed before workers registered.
+        coord_status = await snk_conn.run(
+            f"docker inspect --format={{{{.State.Status}}}} {nes_name} 2>&1",
+            check=False,
+        )
+        status = (coord_status.stdout or "").strip()
+        if status and status != "running":
+            coord_logs = await snk_conn.run(f"docker logs {nes_name} 2>&1", check=False)
+            logs = (coord_logs.stdout or coord_logs.stderr or "(no output)").strip()
+            raise RuntimeError(
+                f"NES coordinator '{nes_name}' is not running (status: {status!r}).\n"
+                f"Logs:\n{logs}"
+            )
+
+        rest = await snk_conn.run(topology_cmd, check=False)
+        if rest.exit_status == 0 and rest.stdout:
+            try:
+                payload = _json.loads(rest.stdout)
+            except _json.JSONDecodeError:
+                payload = {}
+            nodes = payload.get("nodes") if isinstance(payload, dict) else []
+            seen = len(nodes) if isinstance(nodes, list) else 0
+            if seen != last_seen:
+                print(f"  NES topology nodes: {seen}/{expected_count}")
+                last_seen = seen
+            if seen >= expected_count:
+                return
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for NES topology workers "
         f"({expected_count} expected, last seen {max(last_seen, 0)})."
     )
 
@@ -962,11 +1059,15 @@ async def _run_flink_experiment(
 
     # Clear log contents before starting (sudo needed: container writes as root)
     print("  Clearing remote logs...")
-    await _run(src_conn, f"sudo rm -rf {src_home}/logs/", check=False)
-    await _run(snk_conn, f"sudo rm -rf {snk_home}/logs/", check=False)
-    for wn in worker_nodes:
-        wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], f"sudo rm -rf {wh}/logs/", check=False)
+    clear_jobs = [
+        _clear_remote_path(src_conn, f"{src_home}/logs/"),
+        _clear_remote_path(snk_conn, f"{snk_home}/logs/"),
+    ]
+    clear_jobs.extend(
+        _clear_remote_path(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
+    )
+    await asyncio.gather(*clear_jobs)
 
     # Upload Flink configs once
     print("  Uploading Flink configs...")
@@ -1182,8 +1283,15 @@ async def _run_nes_experiment(
 
     # Clear logs (sudo: containers write as root)
     print("  Clearing remote logs...")
-    await _run(src_conn, f"sudo rm -rf {src_home}/logs/", check=False)
-    await _run(snk_conn, f"sudo rm -rf {snk_home}/logs/", check=False)
+    clear_jobs = [
+        _clear_remote_path(src_conn, f"{src_home}/logs/"),
+        _clear_remote_path(snk_conn, f"{snk_home}/logs/"),
+    ]
+    clear_jobs.extend(
+        _clear_remote_path(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
+    )
+    await asyncio.gather(*clear_jobs)
 
     # Upload NES configs
     print("  Uploading NES configs...")
@@ -1259,8 +1367,17 @@ async def _run_nes_experiment(
         await _assert_running(worker_conns[wn.id], wn_names[wn.id])
     await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
 
-    print(f"  Waiting {NES_WARMUP}s for NES cluster to form...")
-    await asyncio.sleep(NES_WARMUP)
+    expected_nes_nodes = len(worker_nodes) + 1  # +1 for coordinator-local worker
+    print(
+        "  Waiting for NES topology to report "
+        f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
+    )
+    await _wait_nes_topology_workers_ready(
+        snk_conn=snk_conn,
+        nes_name=nes_name,
+        expected_count=expected_nes_nodes,
+    )
+    print("  NES cluster is ready.")
 
     try:
         for rep in range(1, exp.repetitions + 1):
