@@ -105,6 +105,13 @@ def _build_onprem_hosts(
                 k: v for k, v in (onprem_file_vars.get(hostname) or {}).items()
                 if k not in _ONPREM_STRIP_KEYS
             }
+            # Topology values are authoritative defaults; inventory file vars
+            # can override them when present.
+            file_vars.setdefault("ansible_host", topo_node.address)
+            file_vars.setdefault("wireguard_endpoint", topo_node.address)
+            file_vars.setdefault("ansible_user", "ubuntu")
+            file_vars.setdefault("node_class", "onprem")
+            file_vars.setdefault("node_type", topo_node.node_type.lower())
             onprem_hosts[hostname] = file_vars
 
     return onprem_hosts, onprem_id_to_topo
@@ -125,6 +132,11 @@ def _build_wg_configs(
     On-prem nodes use their topology ``address`` as the LAN endpoint; an
     explicit ``ansible_host`` in onprem_hosts overrides that if set.
     """
+    # On-prem-only topology: no cloud nodes are present/provisioned, so skip
+    # WireGuard entirely and use native cluster networking.
+    if not cloud_host_ips:
+        return {}
+
     onprem_host_ips: dict[str, str] = {}
     for hostname, vars_ in onprem_hosts.items():
         ip = vars_.get("wireguard_endpoint") or vars_.get("ansible_host")
@@ -212,11 +224,11 @@ def _apply_onprem_wg(
         topo_nid = onprem_id_to_topo.get(hostname, hostname)
         if topo_nid in graph:
             entry.setdefault("node_type", graph.nodes[topo_nid]["data"].node_type.lower())
+        entry.setdefault("node_class", "onprem")
         cfg = wg_configs.get(topo_nid, {})
         if cfg.get("wireguard_interfaces"):
             entry.setdefault("wireguard_interfaces", cfg["wireguard_interfaces"])
             entry.setdefault("wireguard_ecmp_routes", cfg.get("wireguard_ecmp_routes", []))
-            entry.setdefault("node_class", "onprem")
 
 
 def write_inventory(

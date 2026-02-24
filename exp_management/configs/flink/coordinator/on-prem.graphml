@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+    <key id="type"    for="node" attr.name="type"              attr.type="string"/>
+    <key id="id"      for="node" attr.name="id"                attr.type="string"/>
+    <key id="compute" for="node" attr.name="computeCapability" attr.type="double"/>
+    <key id="memory"  for="node" attr.name="memoryCapability"  attr.type="double"/>
+    <key id="slots"   for="node" attr.name="slots"             attr.type="int"/>
+
+    <graph id="processing-topology" edgedefault="directed">
+        <node id="snk">
+            <data key="type">sink</data>
+            <data key="id">Sink1</data>
+        </node>
+
+        <node id="N1">
+            <data key="type">compute</data>
+            <data key="id">10.10.2.182</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N2">
+            <data key="type">compute</data>
+            <data key="id">10.10.2.183</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N3">
+            <data key="type">compute</data>
+            <data key="id">10.10.2.184</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N4">
+            <data key="type">compute</data>
+            <data key="id">10.10.2.185</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N5">
+            <data key="type">compute</data>
+            <data key="id">10.10.2.186</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="src">
+            <data key="type">source</data>
+            <data key="id">Source1</data>
+        </node>
+
+        <edge id="N1_snk" source="N1" target="snk"/>
+        <edge id="N1_N2" source="N1" target="N2"/>
+        <edge id="N1_N3" source="N1" target="N3"/>
+        <edge id="N1_N4" source="N1" target="N4"/>
+        <edge id="N1_N5" source="N1" target="N5"/>
+        <edge id="N2_snk" source="N2" target="snk"/>
+        <edge id="N2_N1" source="N2" target="N1"/>
+        <edge id="N2_N3" source="N2" target="N3"/>
+        <edge id="N2_N4" source="N2" target="N4"/>
+        <edge id="N2_N5" source="N2" target="N5"/>
+        <edge id="N3_snk" source="N3" target="snk"/>
+        <edge id="N3_N1" source="N3" target="N1"/>
+        <edge id="N3_N2" source="N3" target="N2"/>
+        <edge id="N3_N4" source="N3" target="N4"/>
+        <edge id="N3_N5" source="N3" target="N5"/>
+        <edge id="N4_snk" source="N4" target="snk"/>
+        <edge id="N4_N1" source="N4" target="N1"/>
+        <edge id="N4_N2" source="N4" target="N2"/>
+        <edge id="N4_N3" source="N4" target="N3"/>
+        <edge id="N4_N5" source="N4" target="N5"/>
+        <edge id="N5_snk" source="N5" target="snk"/>
+        <edge id="N5_N1" source="N5" target="N1"/>
+        <edge id="N5_N2" source="N5" target="N2"/>
+        <edge id="N5_N3" source="N5" target="N3"/>
+        <edge id="N5_N4" source="N5" target="N4"/>
+        <edge id="src_snk" source="src" target="snk"/>
+        <edge id="src_N1" source="src" target="N1"/>
+        <edge id="src_N2" source="src" target="N2"/>
+        <edge id="src_N3" source="src" target="N3"/>
+        <edge id="src_N4" source="src" target="N4"/>
+        <edge id="src_N5" source="src" target="N5"/>
+
+    </graph>
+</graphml>

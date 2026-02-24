@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    { "id": "snk", "address": "10.10.2.181", "node_type": "sink", "on-prem-id": "zs01", "location": "on-prem"},
+    { "id": "N1", "address": "10.10.2.182", "node_type": "compute", "on-prem-id": "zs02", "location": "on-prem"},
+    { "id": "N2", "address": "10.10.2.183", "node_type": "compute", "on-prem-id": "zs03", "location": "on-prem"},
+    { "id": "N3", "address": "10.10.2.188", "node_type": "compute", "on-prem-id": "zs08", "location": "on-prem"},
+    { "id": "N4", "address": "10.10.2.185", "node_type": "compute", "on-prem-id": "zs05", "location": "on-prem"},
+    { "id": "N5", "address": "10.10.2.186", "node_type": "compute", "on-prem-id": "zs06", "location": "on-prem"},
+    { "id": "src", "address": "10.10.2.187", 	"node_type": 	"source", 	"on-prem-id":"zs07","location":"on-prem"}
+  ],
+  "edges": []
+}

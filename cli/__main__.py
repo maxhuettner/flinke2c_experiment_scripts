@@ -123,6 +123,11 @@ def _prepare_tfvars(topology_file: str) -> None:
     print(f"  wrote {TERRAFORM_TFVARS}")
 
 
+def _has_cloud_instances(tfvars: dict) -> bool:
+    """Return True when the generated tfvars contain EC2 instances to provision."""
+    return bool((tfvars or {}).get("ec2_instances"))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -149,17 +154,21 @@ def setup(topology_file: str) -> None:
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
 
-    # 2. Provision EC2 instances.
-    _terraform(f"-chdir={TERRAFORM_DIR}", "init")
-    _terraform(
-        f"-chdir={TERRAFORM_DIR}",
-        "apply", "-auto-approve",
-        f"-var-file={TERRAFORM_TFVARS.name}",
-    )
+    # 2. Provision EC2 instances when the topology includes cloud nodes.
+    instance_map: dict = {}
+    if _has_cloud_instances(tfvars):
+        _terraform(f"-chdir={TERRAFORM_DIR}", "init")
+        _terraform(
+            f"-chdir={TERRAFORM_DIR}",
+            "apply", "-auto-approve",
+            f"-var-file={TERRAFORM_TFVARS.name}",
+        )
 
-    # 3. Fetch instance IPs from Terraform outputs.
-    outputs = _fetch_terraform_outputs()
-    instance_map: dict = outputs.get("instances", {}).get("value", {})
+        # 3. Fetch instance IPs from Terraform outputs.
+        outputs = _fetch_terraform_outputs()
+        instance_map = outputs.get("instances", {}).get("value", {})
+    else:
+        print("  no cloud nodes to provision; skipping Terraform apply")
 
     # 4. Build Ansible inventory with WireGuard routing config.
     ansible_user = (
@@ -193,8 +202,15 @@ def gen_inventory(topology_file: str) -> None:
     (i.e. 'setup' must have been run at least once).
     """
     graph = load_topology(topology_file)
-    outputs = _fetch_terraform_outputs()
-    instance_map: dict = outputs.get("instances", {}).get("value", {})
+    # On-prem-only topologies have no Terraform-managed instances.
+    try:
+        tfvars = build_tfvars(graph, ssh_public_key=None, aws_region=os.environ.get("AWS_REGION", "eu-central-1"))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    instance_map: dict = {}
+    if _has_cloud_instances(tfvars):
+        outputs = _fetch_terraform_outputs()
+        instance_map = outputs.get("instances", {}).get("value", {})
 
     ansible_user = (
         os.environ.get("ANSIBLE_CLOUD_SSH_USER")
@@ -228,6 +244,10 @@ def destroy(topology_file: str) -> None:
         raise click.ClickException(str(exc)) from exc
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
+
+    if not _has_cloud_instances(tfvars):
+        print("  no cloud nodes in topology; skipping Terraform destroy")
+        return
 
     _terraform(f"-chdir={TERRAFORM_DIR}", "init")
     _terraform(
