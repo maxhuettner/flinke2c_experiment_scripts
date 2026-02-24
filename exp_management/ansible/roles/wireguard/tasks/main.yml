@@ -83,6 +83,36 @@
         path: /etc/wireguard/wg0.conf
         state: absent
 
+    # -----------------------------------------------------------------------
+    # Cleanup of any pre-existing wg_* interfaces from prior runs.  If a stale
+    # link exists, wg-quick@<iface> start can fail with "interface exists".
+    # -----------------------------------------------------------------------
+    - name: Discover existing wg_* interfaces
+      ansible.builtin.shell: "ip -o link show | awk -F': ' '$2 ~ /^wg_/ {print $2}'"
+      register: wg_existing_interfaces
+      changed_when: false
+      failed_when: false
+
+    - name: Stop existing WireGuard services before cleanup
+      ansible.builtin.service:
+        name: "wg-quick@{{ wg_iface }}"
+        state: stopped
+      loop: "{{ wg_existing_interfaces.stdout_lines | default([]) }}"
+      loop_control:
+        loop_var: wg_iface
+      failed_when: false
+      when: (wg_existing_interfaces.stdout_lines | default([])) | length > 0
+
+    - name: Delete existing wg_* interfaces before reconfiguration
+      ansible.builtin.command: ip link delete {{ wg_iface }}
+      loop: "{{ wg_existing_interfaces.stdout_lines | default([]) }}"
+      loop_control:
+        loop_var: wg_iface
+      register: _wg_delete_result
+      failed_when: false
+      changed_when: _wg_delete_result.rc == 0
+      when: (wg_existing_interfaces.stdout_lines | default([])) | length > 0
+
     - name: Clear failed service state so systemd will attempt a fresh start
       ansible.builtin.command: >
         systemctl reset-failed wg-quick@{{ iface.interface }}

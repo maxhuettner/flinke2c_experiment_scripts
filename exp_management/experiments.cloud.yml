@@ -6,11 +6,14 @@
 #     -e exp_management/experiments.example.yml \
 #     -o results/
 #
+# Top-level fields:
+#   repetitions       - global default repetitions for all experiments (optional)
+#
 # Fields per experiment:
 #   name              - identifier; also used as the log output subdirectory
 #   system            - streaming system to use (currently only "flink")
 #   query             - query name, resolves to exp_management/queries/flink/<name>.sql
-#   repetitions       - how many times to run the query (default: 1)
+#   repetitions       - per-experiment override (defaults to top-level repetitions or 1)
 #   placement_method  - "" (default) or e.g. "TOP_DOWN" (enables topology-aware placement)
 #   graphml_file      - graphml filename in exp_management/configs/flink/coordinator/
 #                       (optional; defaults to <topology-stem>.graphml when placement_method is set)
@@ -19,41 +22,37 @@
 # Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
+repetitions: 7
+
 experiments:
   - name: flink_q1_cloud
     system: flink
     query: q1
-    repetitions: 5
 
   - name: flink_q4_cloud
     system: flink
     query: q4
-    repetitions: 5
     num_task_slots: 3
 
   - name: flink_q5_cloud
     system: flink
     query: q5
-    repetitions: 5
     
   - name: flinke2c_td_q1_cloud
     system: flink
     query: q1
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: cloud.graphml
 
   - name: flinke2c_bu_q1_cloud
     system: flink
     query: q1
-    repetitions: 5
     placement_method: BOTTOM_UP
     graphml_file: cloud.graphml
 
   - name: flinke2c_td_q4_cloud
     system: flink
     query: q4
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: cloud.graphml
     num_task_slots: 3
@@ -61,7 +60,6 @@ experiments:
   - name: flinke2c_td_q5_cloud
     system: flink
     query: q5
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: cloud.graphml
     num_task_slots: 3
@@ -69,14 +67,11 @@ experiments:
   - name: nes_q1_cloud
     system: nes
     query: q1
-    repetitions: 5
 
   - name: nes_q4_cloud
     system: nes
     query: q4
-    repetitions: 5
 
   - name: nes_q5_cloud
     system: nes
     query: q5
-    repetitions: 5

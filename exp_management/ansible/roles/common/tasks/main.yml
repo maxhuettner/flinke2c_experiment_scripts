@@ -95,6 +95,16 @@
     - docker_check.rc == 0
     - docker_prune_before_pull | default(false)
 
+- name: Pre-pull node-specific Docker images (always refresh tags)
+  ansible.builtin.command: "docker pull {{ image }}"
+  loop: "{{ docker_images_to_pull }}"
+  loop_control:
+    loop_var: image
+  when:
+    - docker_images_to_pull | length > 0
+    - docker_check.rc == 0
+    - docker_pull_always | default(true)
+
 - name: Check which node-specific Docker images are already present
   ansible.builtin.command: "docker image inspect {{ image }}"
   loop: "{{ docker_images_to_pull }}"
@@ -106,6 +116,7 @@
   when:
     - docker_images_to_pull | length > 0
     - docker_check.rc == 0
+    - not (docker_pull_always | default(true))
 
 - name: Build list of missing Docker images
   ansible.builtin.set_fact:
@@ -119,6 +130,7 @@
   when:
     - docker_images_to_pull | length > 0
     - docker_check.rc == 0
+    - not (docker_pull_always | default(true))
 
 - name: Pre-pull missing node-specific Docker images
   ansible.builtin.command: "docker pull {{ image }}"
@@ -128,15 +140,40 @@
   when:
     - (docker_images_missing | default([])) | length > 0
     - docker_check.rc == 0
+    - not (docker_pull_always | default(true))
 
-- name: Install cloud specific packages
+- name: Install cloud specific apt packages (excluding awscli fallback package)
   ansible.builtin.apt:
-    name: "{{ common_cloud_packages }}"
+    name: "{{ common_cloud_apt_packages }}"
     state: present
+  vars:
+    common_cloud_apt_packages: "{{ common_cloud_packages | difference(['awscli']) }}"
   when:
     - node_class is defined
     - node_class == 'cloud'
-    - common_cloud_packages | length > 0
+    - common_cloud_apt_packages | length > 0
+
+- name: Install awscli from apt when requested
+  ansible.builtin.apt:
+    name: awscli
+    state: present
+  register: awscli_apt_result
+  failed_when: false
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - "'awscli' in common_cloud_packages"
+
+- name: Install awscli via pip when apt package is unavailable
+  ansible.builtin.pip:
+    name: awscli
+    state: present
+    executable: pip3
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - "'awscli' in common_cloud_packages"
+    - awscli_apt_result is failed
 
 - name: Install on-prem specific packages
   ansible.builtin.apt:

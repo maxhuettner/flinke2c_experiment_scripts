@@ -1,3 +1,5 @@
 /target
 .env
 results
+
+.DS_Store

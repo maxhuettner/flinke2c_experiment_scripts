@@ -1,38 +1,34 @@
+repetitions: 7
+
 experiments:
   - name: flink_q1_edge_heavy
     system: flink
     query: q1
-    repetitions: 5
 
   - name: flink_q4_edge_heavy
     system: flink
     query: q4
-    repetitions: 5
     num_task_slots: 3
 
   - name: flink_q5_edge_heavy
     system: flink
     query: q5
-    repetitions: 5
     
   - name: flinke2c_td_q1_edge_heavy
     system: flink
     query: q1
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
   - name: flinke2c_bu_q1_edge_heavy
     system: flink
     query: q1
-    repetitions: 5
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
   - name: flinke2c_td_q4_edge_heavy
     system: flink
     query: q4
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
     num_task_slots: 3
@@ -40,7 +36,6 @@ experiments:
   - name: flinke2c_td_q5_edge_heavy
     system: flink
     query: q5
-    repetitions: 5
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
     num_task_slots: 3
@@ -48,14 +43,11 @@ experiments:
   - name: nes_q1_edge_heavy
     system: nes
     query: q1
-    repetitions: 5
 
   - name: nes_q4_edge_heavy
     system: nes
     query: q4
-    repetitions: 5
 
   - name: nes_q5_edge_heavy
     system: nes
     query: q5
-    repetitions: 5

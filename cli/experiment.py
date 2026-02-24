@@ -2,16 +2,17 @@
 
 Experiment YAML format (e.g. exp_management/experiments.yml):
 
+    repetitions: 3   # optional global default for all experiments
     experiments:
       - name: q1_local
         system: flink        # currently the only supported system
         query: q1            # resolves to exp_management/queries/flink/q1.sql
-        repetitions: 3
+        # repetitions omitted -> uses global default (3)
 
       - name: q4_cluster
         system: flink
         query: q4
-        repetitions: 2
+        repetitions: 2       # optional per-experiment override
         placement_method: cluster   # generates topology.graphml for Flink
 
 Per-query extra args and task slot counts are read from
@@ -23,7 +24,8 @@ Usage:
         -f config/topologies/edge-to-cloud.json \\
         -e exp_management/experiments.yml \\
         [-o results/] \\
-        [--skip-data-upload]
+        [--skip-data-upload] \\
+        [--start-with-rep N]
 """
 
 from __future__ import annotations
@@ -103,13 +105,14 @@ class NodeInfo:
 
 def load_experiments(path: str) -> list[ExperimentSpec]:
     with open(path) as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
+    global_repetitions = int(raw.get("repetitions", 1))
     return [
         ExperimentSpec(
             name=e["name"],
             system=e.get("system", "flink"),
             query=e["query"],
-            repetitions=int(e.get("repetitions", 1)),
+            repetitions=int(e.get("repetitions", global_repetitions)),
             placement_method=e.get("placement_method", ""),
             num_task_slots=e.get("num_task_slots"),
             graphml_file=e.get("graphml_file", ""),
@@ -1008,6 +1011,7 @@ async def _run_flink_experiment(
     lib_jars: list[Path],
     qcfg: dict,
     output_dir: Path,
+    start_with_rep: Optional[int] = None,
 ) -> None:
     per_query  = qcfg.get(exp.query, {})
     task_slots = exp.num_task_slots or per_query.get("num_task_slots", 1)
@@ -1061,6 +1065,9 @@ async def _run_flink_experiment(
     tm_names     = {wn.id: f"flink-tm-{wn.id}-{exp_id}" for wn in worker_nodes}
 
     system_flag = "--system nes" if exp.system == "nes" else ""
+    start_with_rep_arg = (
+        f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
+    )
 
     # Kill all containers on each node (dedicated experiment nodes).
     _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
@@ -1107,6 +1114,7 @@ async def _run_flink_experiment(
         TCP_IMAGE,
         "source /data/bid_events.parquet",
         f"--address 0.0.0.0:10000 {system_flag} --schema bid --exp-name {exp.name}",
+        start_with_rep_arg,
         bid_extra,
     ])).strip())
     await _assert_running(src_conn, bid_name)
@@ -1120,17 +1128,19 @@ async def _run_flink_experiment(
         TCP_IMAGE,
         "source /data/auction_events.parquet",
         f"--address 0.0.0.0:10001 {system_flag} --schema auction --exp-name {exp.name}",
+        start_with_rep_arg,
     ])))
     await _assert_running(src_conn, auction_name)
 
     print("  Starting sink...")
-    await _run(snk_conn, " ".join([
+    await _run(snk_conn, " ".join(filter(None, [
         "docker run -d -i --init --network=host",
         f"--name {sink_name}",
         f"-v {snk_home}/logs:/opt/tcp/logs",
         TCP_IMAGE,
         f"sink --exp-name {exp.name}",
-    ]))
+        start_with_rep_arg,
+    ])))
     await _assert_running(snk_conn, sink_name)
 
     jm_lib_mounts = " ".join(
@@ -1259,6 +1269,7 @@ async def _run_nes_experiment(
     worker_conns: dict[str, asyncssh.SSHClientConnection],
     worker_homes: dict[str, str],
     output_dir: Path,
+    start_with_rep: Optional[int] = None,
 ) -> None:
     query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
@@ -1285,6 +1296,9 @@ async def _run_nes_experiment(
     nes_name  = f"nes-coord-{exp_id}"
     sink_name = f"tcp-sink-{exp_id}"
     wn_names  = {wn.id: f"nes-worker-{wn.id}-{exp_id}" for wn in worker_nodes}
+    start_with_rep_arg = (
+        f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
+    )
 
     # Kill all containers on all nodes
     _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
@@ -1315,7 +1329,7 @@ async def _run_nes_experiment(
         await _upload_text(worker_conns[wn.id], worker_cfgs[wn.id], f"{wh}/nes-conf/worker.yaml")
 
     print("  Starting bid source...")
-    await _run(src_conn, " ".join([
+    await _run(src_conn, " ".join(filter(None, [
         "docker run -d -i --init --network=host",
         f"--name {bid_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
@@ -1323,11 +1337,12 @@ async def _run_nes_experiment(
         TCP_IMAGE,
         "source /data/bid_events.parquet",
         f"--address 0.0.0.0:10000 --system nes --schema bid --exp-name {exp.name}",
-    ]))
+        start_with_rep_arg,
+    ])))
     await _assert_running(src_conn, bid_name)
 
     print("  Starting auction source...")
-    await _run(src_conn, " ".join([
+    await _run(src_conn, " ".join(filter(None, [
         "docker run -d -i --init --network=host",
         f"--name {auc_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
@@ -1335,18 +1350,20 @@ async def _run_nes_experiment(
         TCP_IMAGE,
         "source /data/auction_events.parquet",
         f"--address 0.0.0.0:10001 --system nes --schema auction --exp-name {exp.name}",
-    ]))
+        start_with_rep_arg,
+    ])))
     await _assert_running(src_conn, auc_name)
 
     # Start TCP sink on snk
     print("  Starting sink...")
-    await _run(snk_conn, " ".join([
+    await _run(snk_conn, " ".join(filter(None, [
         "docker run -d -i --init --network=host",
         f"--name {sink_name}",
         f"-v {snk_home}/logs:/opt/tcp/logs",
         TCP_IMAGE,
         f"sink --exp-name {exp.name}",
-    ]))
+        start_with_rep_arg,
+    ])))
     await _assert_running(snk_conn, sink_name)
 
     # Start NES coordinator on snk
@@ -1429,6 +1446,7 @@ async def run_experiments(
     key_path: str,
     passphrase: Optional[str] = None,
     skip_data_upload: bool = False,
+    start_with_rep: Optional[int] = None,
 ) -> None:
     graph = load_topology(topology_file)
     nodes = load_nodes(topology_file)
@@ -1516,6 +1534,7 @@ async def run_experiments(
                     worker_conns=worker_conns,
                     worker_homes=worker_homes,
                     output_dir=output_base / exp.name,
+                    start_with_rep=start_with_rep,
                 )
             elif exp.system == "flink":
                 await _run_flink_experiment(
@@ -1534,6 +1553,7 @@ async def run_experiments(
                     lib_jars=lib_jars,
                     qcfg=qcfg,
                     output_dir=output_base / exp.name,
+                    start_with_rep=start_with_rep,
                 )
             else:
                 raise ValueError(f"Unknown system: {exp.system!r}. Supported: 'flink', 'nes'")

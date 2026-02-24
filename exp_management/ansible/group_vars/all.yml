@@ -34,7 +34,11 @@ docker_images_by_node_type:
     - maxhue/flinke2c
     - maxhue/nes-worker
 
-# Pull only missing images by default; pruning can be very slow on cloud nodes.
+# Refresh configured images on every setup run so reused tags (e.g. latest) are
+# up to date across cloud/on-prem nodes.
+docker_pull_always: true
+
+# Pruning can be very slow on cloud nodes; keep disabled by default.
 docker_prune_before_pull: false
 
 wireguard_package_map:
