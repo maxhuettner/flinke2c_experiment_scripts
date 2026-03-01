@@ -948,6 +948,21 @@ def _rewrite_graphml_slots(graphml_content: str, task_slots: int) -> tuple[str, 
     return rewritten, count
 
 
+def _rewrite_sql_tcp_hosts(sql_content: str, source_host: str, sink_host: str) -> tuple[str, int, int]:
+    """Rewrite tcp-source/tcp-sink host values in SQL WITH connector blocks."""
+    source_pattern = re.compile(
+        r"('connector'\s*=\s*'tcp-source'\s*,\s*'host'\s*=\s*')[^']+(')",
+        flags=re.IGNORECASE,
+    )
+    sink_pattern = re.compile(
+        r"('connector'\s*=\s*'tcp-sink'\s*,\s*'host'\s*=\s*')[^']+(')",
+        flags=re.IGNORECASE,
+    )
+    rewritten, src_count = source_pattern.subn(rf"\g<1>{source_host}\2", sql_content)
+    rewritten, snk_count = sink_pattern.subn(rf"\g<1>{sink_host}\2", rewritten)
+    return rewritten, src_count, snk_count
+
+
 # ── Per-experiment logic ───────────────────────────────────────────────────────
 
 async def _run_flink_repetition(
@@ -980,7 +995,7 @@ async def _run_flink_repetition(
     print(f"  Submitting query '{exp.query}'...")
     await _upload_text(snk_conn, combined_sql, f"{snk_home}/flink_query.sql")
     await _run(snk_conn, " ".join(filter(None, [
-        "docker run -d --rm --network=host",
+        "docker run --privileged -d --rm --network=host",
         f"--name {sql_name}",
         f"-v {snk_home}/flinke2c-conf:/conf/",
         f"-v {snk_home}/flink_query.sql:/tmp/flink_query.sql:ro",
@@ -1026,6 +1041,14 @@ async def _run_flink_experiment(
     if setup_sql_path.exists():
         combined_sql += setup_sql_path.read_text() + "\n"
     combined_sql += query_sql_path.read_text()
+    combined_sql, src_rewrites, snk_rewrites = _rewrite_sql_tcp_hosts(
+        combined_sql, source_host=src.address, sink_host=snk.address
+    )
+    if src_rewrites or snk_rewrites:
+        print(
+            "  Rewrote SQL TCP connector hosts "
+            f"(sources={src_rewrites} -> {src.address}, sinks={snk_rewrites} -> {snk.address})"
+        )
 
     # Resolve graphml: explicit graphml_file > topology-stem static file > dynamic
     graphml_content:  Optional[str] = None
@@ -1107,7 +1130,7 @@ async def _run_flink_experiment(
     # Start all containers — they stay up for every repetition
     print("  Starting bid source...")
     await _run(src_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {bid_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
@@ -1121,7 +1144,7 @@ async def _run_flink_experiment(
 
     print("  Starting auction source...")
     await _run(src_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {auction_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
@@ -1134,7 +1157,7 @@ async def _run_flink_experiment(
 
     print("  Starting sink...")
     await _run(snk_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {sink_name}",
         f"-v {snk_home}/logs:/opt/tcp/logs",
         TCP_IMAGE,
@@ -1149,7 +1172,7 @@ async def _run_flink_experiment(
     )
     print("  Starting Flink jobmanager...")
     await _run(snk_conn, " ".join(filter(None, [
-        "docker run -d --network=host",
+        "docker run --privileged -d --network=host",
         f"--name {jm_name}",
         f"-v {snk_home}/flinke2c-conf:/conf/",
         jm_lib_mounts,
@@ -1165,7 +1188,7 @@ async def _run_flink_experiment(
             for j in lib_jars
         )
         await _run(worker_conns[wn.id], " ".join(filter(None, [
-            "docker run -d --network=host",
+            "docker run --privileged -d --network=host",
             f"--name {tm_names[wn.id]}",
             _cpus_flag(wn),
             f"-v {wh}/flinke2c-conf:/conf/",
@@ -1330,7 +1353,7 @@ async def _run_nes_experiment(
 
     print("  Starting bid source...")
     await _run(src_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {bid_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
@@ -1343,7 +1366,7 @@ async def _run_nes_experiment(
 
     print("  Starting auction source...")
     await _run(src_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {auc_name}",
         f"-v {src_home}/logs:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
@@ -1357,7 +1380,7 @@ async def _run_nes_experiment(
     # Start TCP sink on snk
     print("  Starting sink...")
     await _run(snk_conn, " ".join(filter(None, [
-        "docker run -d -i --init --network=host",
+        "docker run --privileged -d -i --init --network=host",
         f"--name {sink_name}",
         f"-v {snk_home}/logs:/opt/tcp/logs",
         TCP_IMAGE,
@@ -1369,7 +1392,7 @@ async def _run_nes_experiment(
     # Start NES coordinator on snk
     print("  Starting NES coordinator...")
     await _run(snk_conn, " ".join([
-        "docker run -d --init --network=host",
+        "docker run --privileged -d --init --network=host",
         f"--name {nes_name}",
         f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
         NES_COORDINATOR_IMAGE,
@@ -1387,7 +1410,7 @@ async def _run_nes_experiment(
     async def _start_nes_worker(wn: NodeInfo) -> None:
         wh = worker_homes[wn.id]
         await _run(worker_conns[wn.id], " ".join(filter(None, [
-            "docker run -d --init --network=host",
+            "docker run --privileged -d --init --network=host",
             f"--name {wn_names[wn.id]}",
             _cpus_flag(wn),
             f"-v {wh}/nes-conf/worker.yaml:/config.yaml",

@@ -1,4 +1,4 @@
-repetitions: 7
+repetitions: 11
 
 experiments:
   - name: flink_q1_e2c
