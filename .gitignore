@@ -3,3 +3,6 @@
 results
 
 .DS_Store
+.claude
+__pycache__
+network_sim_cli.egg-info

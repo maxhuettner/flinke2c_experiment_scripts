@@ -1,2 +1,0 @@
-[console_scripts]
-sim = cli.__main__:main
