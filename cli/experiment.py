@@ -479,6 +479,21 @@ async def _clear_remote_path(conn: asyncssh.SSHClientConnection, path: str) -> N
         )
 
 
+async def _ensure_remote_dir(conn: asyncssh.SSHClientConnection, path: str) -> None:
+    """Create a remote directory tree, falling back to sudo for root-owned parents."""
+    mkdir_result = await conn.run(f"mkdir -p {path}", check=False)
+    if mkdir_result.exit_status == 0:
+        return
+
+    sudo_result = await conn.run(f"sudo -n mkdir -p {path}", check=False)
+    if sudo_result.exit_status != 0:
+        raise RuntimeError(
+            f"Failed to create remote directory {path!r}.\n"
+            f"mkdir stderr: {(mkdir_result.stderr or '').strip()}\n"
+            f"sudo mkdir stderr: {(sudo_result.stderr or '').strip()}"
+        )
+
+
 async def _wait_flink_taskmanagers_ready(
     snk_conn: asyncssh.SSHClientConnection,
     jm_name: str,
@@ -1137,7 +1152,7 @@ async def _run_flink_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {bid_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/bids:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/bid_events.parquet",
@@ -1151,7 +1166,7 @@ async def _run_flink_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {auction_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/auctions:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/auction_events.parquet",
@@ -1164,7 +1179,7 @@ async def _run_flink_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {person_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/persons:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/person_events.parquet",
@@ -1380,7 +1395,7 @@ async def _run_nes_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {bid_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/bids:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/bid_events.parquet",
@@ -1393,7 +1408,7 @@ async def _run_nes_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {auc_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/auctions:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/auction_events.parquet",
@@ -1406,7 +1421,7 @@ async def _run_nes_experiment(
     await _run(src_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
         f"--name {person_name}",
-        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/logs/persons:/opt/tcp/logs",
         f"-v {src_home}/data:/data:ro",
         TCP_IMAGE,
         "source /data/person_events.parquet",
@@ -1563,11 +1578,19 @@ async def run_experiments(
 
         # One-time setup: directories and source data
         print("\nPreparing remote directories...")
-        await _run(src_conn, f"mkdir -p {src_home}/data {src_home}/logs {src_home}/flinke2c-conf")
-        await _run(snk_conn, f"mkdir -p {snk_home}/logs {snk_home}/flinke2c-conf {snk_home}/flinke2c-lib")
+        await _ensure_remote_dir(src_conn, f"{src_home}/data")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/bids")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/auctions")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/persons")
+        await _ensure_remote_dir(src_conn, f"{src_home}/flinke2c-conf")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/logs")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/flinke2c-conf")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/flinke2c-lib")
         for wn in worker_nodes:
             wh = worker_homes[wn.id]
-            await _run(worker_conns[wn.id], f"mkdir -p {wh}/logs {wh}/flinke2c-conf {wh}/flinke2c-lib")
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/logs")
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/flinke2c-conf")
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/flinke2c-lib")
 
         if not skip_data_upload:
             await _sync_source_data(src, src_home, key_path)
