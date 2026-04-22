@@ -53,38 +53,50 @@ experiments:
   #   placement_method: BOTTOM_UP
   #   graphml_file: edge-to-cloud.graphml
 
-  - name: flinke2c_td_q3_e2c
-    system: flink
-    query: q3
-    placement_method: TOP_DOWN
-    graphml_file: edge-to-cloud.graphml
+  # - name: flinke2c_td_q3_e2c
+  #   system: flink
+  #   query: q3
+  #   placement_method: TOP_DOWN
+  #   graphml_file: edge-to-cloud.graphml
 
-  - name: flinke2c_bu_q3_e2c
+  # - name: flinke2c_bu_q3_e2c
+  #   system: flink
+  #   query: q3
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: edge-to-cloud.graphml
+
+  # - name: flinke2c_td_q7_e2c
+  #   system: flink
+  #   query: q7
+  #   placement_method: TOP_DOWN
+  #   graphml_file: edge-to-cloud.graphml
+
+  # - name: flinke2c_bu_q7_e2c
+  #   system: flink
+  #   query: q7
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: edge-to-cloud.graphml
+
+  # - name: flinke2c_td_q8_e2c
+  #   system: flink
+  #   query: q8
+  #   placement_method: TOP_DOWN
+  #   graphml_file: edge-to-cloud.graphml
+
+  # - name: flinke2c_bu_q8_e2c
+  #   system: flink
+  #   query: q8
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q4_e2c
     system: flink
-    query: q3
+    query: q4
     placement_method: BOTTOM_UP
     graphml_file: edge-to-cloud.graphml
 
-  - name: flinke2c_td_q7_e2c
+  - name: flinke2c_bu_q5_e2c
     system: flink
-    query: q7
-    placement_method: TOP_DOWN
-    graphml_file: edge-to-cloud.graphml
-
-  - name: flinke2c_bu_q7_e2c
-    system: flink
-    query: q7
-    placement_method: BOTTOM_UP
-    graphml_file: edge-to-cloud.graphml
-
-  - name: flinke2c_td_q8_e2c
-    system: flink
-    query: q8
-    placement_method: TOP_DOWN
-    graphml_file: edge-to-cloud.graphml
-
-  - name: flinke2c_bu_q8_e2c
-    system: flink
-    query: q8
+    query: q5
     placement_method: BOTTOM_UP
     graphml_file: edge-to-cloud.graphml

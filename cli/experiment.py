@@ -547,6 +547,96 @@ async def _wait_flink_taskmanagers_ready(
     )
 
 
+async def _flink_list_jobs(
+    snk_conn: asyncssh.SSHClientConnection,
+) -> list[dict]:
+    """Return the Flink job list from the JobManager REST API."""
+    result = await snk_conn.run(
+        "curl -fsS http://127.0.0.1:8081/jobs",
+        check=False,
+    )
+    if result.exit_status != 0:
+        raise RuntimeError(
+            "Failed to query Flink jobs via REST.\n"
+            f"stderr: {(result.stderr or '').strip()}"
+        )
+
+    try:
+        payload = _json.loads(result.stdout or "{}")
+    except _json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Failed to decode Flink jobs REST response.\n"
+            f"Body:\n{(result.stdout or '').strip()}"
+        ) from exc
+
+    jobs = payload.get("jobs")
+    return jobs if isinstance(jobs, list) else []
+
+
+async def _wait_flink_job_finished(
+    snk_conn: asyncssh.SSHClientConnection,
+    existing_job_ids: set[str],
+    timeout: float = DONE_TIMEOUT,
+) -> str:
+    """Wait for the newly submitted Flink job to appear and reach FINISHED."""
+    deadline = time.monotonic() + timeout
+    job_id: Optional[str] = None
+    last_status: Optional[str] = None
+    saw_running = False
+
+    while time.monotonic() < deadline:
+        jobs = await _flink_list_jobs(snk_conn)
+
+        if job_id is None:
+            new_jobs = [
+                j for j in jobs
+                if isinstance(j, dict) and j.get("id") not in existing_job_ids
+            ]
+            if new_jobs:
+                job_id = str(new_jobs[0].get("id"))
+                print(f"  Flink job submitted: {job_id}")
+
+        if job_id is not None:
+            job = next(
+                (
+                    j for j in jobs
+                    if isinstance(j, dict) and str(j.get("id")) == job_id
+                ),
+                None,
+            )
+            if job is not None:
+                status = str(job.get("status", "UNKNOWN"))
+                if status != last_status:
+                    print(f"  Flink job {job_id}: {status}")
+                    last_status = status
+
+                if status == "RUNNING":
+                    saw_running = True
+
+                if status in {"RESTARTING", "FAILING", "FAILED", "CANCELLING", "CANCELED", "SUSPENDED"}:
+                    raise RuntimeError(
+                        f"Flink job {job_id} entered terminal/error state {status!r}."
+                    )
+
+                if status == "FINISHED":
+                    if not saw_running:
+                        print(
+                            "  Flink job reached FINISHED before RUNNING was observed "
+                            f"(job_id={job_id})."
+                        )
+                    return job_id
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    if job_id is None:
+        raise TimeoutError(
+            f"Timed out after {timeout:.0f}s waiting for submitted Flink job to appear"
+        )
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink job {job_id} to reach FINISHED"
+    )
+
+
 async def _wait_nes_topology_workers_ready(
     snk_conn: asyncssh.SSHClientConnection,
     nes_name: str,
@@ -997,7 +1087,7 @@ async def _run_flink_repetition(
     combined_sql: str,
     lib_jars: list[Path],
 ) -> None:
-    """Submit the SQL query and wait for both sources and sink to signal done.
+    """Submit the SQL query and wait for sink completion and Flink job finish.
 
     All containers (sources, sink, Flink cluster) are already running and
     stay up for the entire experiment; only the sql-client is started here.
@@ -1005,6 +1095,11 @@ async def _run_flink_repetition(
     rep_start = int(time.time())
     print(f"\n--- Repetition {rep}/{total_reps} ---")
     sql_name = f"flink-sql-{exp.name}-r{rep}-{rep_start}"
+    existing_job_ids = {
+        str(j.get("id"))
+        for j in await _flink_list_jobs(snk_conn)
+        if isinstance(j, dict) and j.get("id")
+    }
 
     sql_lib_mounts = " ".join(
         f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
@@ -1025,7 +1120,10 @@ async def _run_flink_repetition(
 
     # ── Wait for completion ────────────────────────────────────────────────
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
-    await _wait_sink_done(snk_conn, sink_name, since=rep_start)
+    await asyncio.gather(
+        _wait_sink_done(snk_conn, sink_name, since=rep_start),
+        _wait_flink_job_finished(snk_conn, existing_job_ids),
+    )
     print(f"  Repetition {rep} complete.")
 
 
