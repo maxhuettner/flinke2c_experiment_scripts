@@ -437,24 +437,28 @@ async def _sync_flink_libs(
         raise RuntimeError(f"rsync lib failed for {node.id} (exit {proc.returncode}):\n{stderr.decode()}")
 
 
-async def _wait_both_done(
-    src_conn: asyncssh.SSHClientConnection,
+async def _wait_sink_done(
     snk_conn: asyncssh.SSHClientConnection,
-    bid_name: str,
     sink_name: str,
     since: int,
     timeout: float = DONE_TIMEOUT,
 ) -> None:
-    """Wait concurrently for bid source and sink to signal completion.
+    """Wait for the sink to signal end-of-repetition.
+
+    The TCP source containers stay up across repetitions and typically log
+    "Waiting for q..." after sending their current batch, so the sink log is
+    the reliable end-of-repetition signal here.
 
     *since* is a Unix timestamp; only log lines produced after that time
     are checked, so signals from earlier repetitions are ignored.
     """
-    await asyncio.gather(
-        _poll_for_pattern(src_conn, bid_name, DONE_SIGNAL, timeout,
-                          label=f"src/{bid_name}", since=since),
-        _poll_for_pattern(snk_conn, sink_name, DONE_SIGNAL, timeout,
-                          label=f"sink/{sink_name}", since=since),
+    await _poll_for_pattern(
+        snk_conn,
+        sink_name,
+        DONE_SIGNAL,
+        timeout,
+        label=f"sink/{sink_name}",
+        since=since,
     )
 
 
@@ -1006,7 +1010,7 @@ async def _run_flink_repetition(
 
     # ── Wait for completion ────────────────────────────────────────────────
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
-    await _wait_both_done(src_conn, snk_conn, bid_name, sink_name, since=rep_start)
+    await _wait_sink_done(snk_conn, sink_name, since=rep_start)
     print(f"  Repetition {rep} complete.")
 
 
@@ -1296,7 +1300,7 @@ async def _run_nes_repetition(
     print(f"  NES response: {result}")
 
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
-    await _wait_both_done(src_conn, snk_conn, bid_name, sink_name, since=rep_start)
+    await _wait_sink_done(snk_conn, sink_name, since=rep_start)
     print(f"  Repetition {rep} complete.")
 
 
