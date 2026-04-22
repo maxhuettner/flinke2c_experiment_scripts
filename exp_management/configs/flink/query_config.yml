@@ -1,3 +1,6 @@
+q3:
+  num_task_slots: 2
+
 q4:
   num_task_slots: 3
   bid_src_extra_arg: --num-events 920000
@@ -5,3 +8,10 @@ q4:
 q5:
   num_task_slots: 3
   bid_src_extra_arg: --num-events 920000
+
+q7:
+  num_task_slots: 2
+  bid_src_extra_arg: --num-events 825000
+
+q8:
+  num_task_slots: 3

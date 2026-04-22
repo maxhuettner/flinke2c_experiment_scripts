@@ -1083,6 +1083,7 @@ async def _run_flink_experiment(
     exp_id       = f"{exp.name}-{int(time.time())}"
     bid_name     = f"tcp-bid-{exp_id}"
     auction_name = f"tcp-auction-{exp_id}"
+    person_name  = f"tcp-person-{exp_id}"
     sink_name    = f"tcp-sink-{exp_id}"
     jm_name      = f"flink-jm-{exp_id}"
     tm_names     = {wn.id: f"flink-tm-{wn.id}-{exp_id}" for wn in worker_nodes}
@@ -1155,6 +1156,19 @@ async def _run_flink_experiment(
     ])))
     await _assert_running(src_conn, auction_name)
 
+    print("  Starting person source...")
+    await _run(src_conn, " ".join(filter(None, [
+        "docker run --privileged -d -i --init --network=host",
+        f"--name {person_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/person_events.parquet",
+        f"--address 0.0.0.0:10002 {system_flag} --schema person --exp-name {exp.name}",
+        start_with_rep_arg,
+    ])))
+    await _assert_running(src_conn, person_name)
+
     print("  Starting sink...")
     await _run(snk_conn, " ".join(filter(None, [
         "docker run --privileged -d -i --init --network=host",
@@ -1201,10 +1215,16 @@ async def _run_flink_experiment(
     await asyncio.gather(*(_start_taskmanager(wn) for wn in worker_nodes))
 
     # Wait for sources to finish loading and for the cluster to form
-    print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
-    await _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
-                            timeout=READY_TIMEOUT, label=bid_name)
-    print("  Source is ready.")
+    print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
+    await asyncio.gather(
+        _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=bid_name),
+        _poll_for_pattern(src_conn, auction_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=auction_name),
+        _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=person_name),
+    )
+    print("  Sources are ready.")
     print(f"  Waiting for Flink REST to report {len(worker_nodes)} taskmanager(s)...")
     await _wait_flink_taskmanagers_ready(
         snk_conn=snk_conn,
@@ -1232,7 +1252,7 @@ async def _run_flink_experiment(
     finally:
         print("  Stopping containers...")
         # TCP streaming containers: send 'q', wait 5 s, then force-remove
-        await _graceful_stop_tcp(src_conn, [bid_name, auction_name])
+        await _graceful_stop_tcp(src_conn, [bid_name, auction_name, person_name])
         await _graceful_stop_tcp(snk_conn, [sink_name])
         # Flink containers: regular stop
         await _stop_containers(snk_conn, [jm_name])
@@ -1314,11 +1334,12 @@ async def _run_nes_experiment(
         )
 
     exp_id    = f"{exp.name}-{int(time.time())}"
-    bid_name  = f"tcp-bid-{exp_id}"
-    auc_name  = f"tcp-auction-{exp_id}"
-    nes_name  = f"nes-coord-{exp_id}"
-    sink_name = f"tcp-sink-{exp_id}"
-    wn_names  = {wn.id: f"nes-worker-{wn.id}-{exp_id}" for wn in worker_nodes}
+    bid_name    = f"tcp-bid-{exp_id}"
+    auc_name    = f"tcp-auction-{exp_id}"
+    person_name = f"tcp-person-{exp_id}"
+    nes_name    = f"nes-coord-{exp_id}"
+    sink_name   = f"tcp-sink-{exp_id}"
+    wn_names    = {wn.id: f"nes-worker-{wn.id}-{exp_id}" for wn in worker_nodes}
     start_with_rep_arg = (
         f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
     )
@@ -1377,6 +1398,19 @@ async def _run_nes_experiment(
     ])))
     await _assert_running(src_conn, auc_name)
 
+    print("  Starting person source...")
+    await _run(src_conn, " ".join(filter(None, [
+        "docker run --privileged -d -i --init --network=host",
+        f"--name {person_name}",
+        f"-v {src_home}/logs:/opt/tcp/logs",
+        f"-v {src_home}/data:/data:ro",
+        TCP_IMAGE,
+        "source /data/person_events.parquet",
+        f"--address 0.0.0.0:10002 --system nes --schema person --exp-name {exp.name}",
+        start_with_rep_arg,
+    ])))
+    await _assert_running(src_conn, person_name)
+
     # Start TCP sink on snk
     print("  Starting sink...")
     await _run(snk_conn, " ".join(filter(None, [
@@ -1399,11 +1433,17 @@ async def _run_nes_experiment(
     ]))
     await _assert_running(snk_conn, nes_name)
 
-    # Wait for bid source to finish loading data
-    print(f"  Waiting for bid source ready ('{READY_SIGNAL}')...")
-    await _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
-                            timeout=READY_TIMEOUT, label=bid_name)
-    print("  Source is ready.")
+    # Wait for sources to finish loading data
+    print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
+    await asyncio.gather(
+        _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=bid_name),
+        _poll_for_pattern(src_conn, auc_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=auc_name),
+        _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
+                          timeout=READY_TIMEOUT, label=person_name),
+    )
+    print("  Sources are ready.")
 
     # Start NES workers on compute nodes
     print(f"  Starting {len(worker_nodes)} NES worker(s)...")
@@ -1445,7 +1485,7 @@ async def _run_nes_experiment(
             )
     finally:
         print("  Stopping containers...")
-        await _graceful_stop_tcp(src_conn, [bid_name, auc_name])
+        await _graceful_stop_tcp(src_conn, [bid_name, auc_name, person_name])
         await _graceful_stop_tcp(snk_conn, [sink_name])
         await _stop_containers(snk_conn, [nes_name])
         for wn in worker_nodes:

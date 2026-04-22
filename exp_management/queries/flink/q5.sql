@@ -1,11 +1,10 @@
 CREATE TABLE
   nexmark_q5 (auction BIGINT, num BIGINT)
-WITH
-  (
-    'connector' = 'tcp-sink',
-    'host' = '10.10.0.10',
-    'port' = '9000'
-  );
+WITH (
+  'connector' = 'tcp-sink',
+  'host' = '10.10.0.10',
+  'port' = '9000'
+);
 
 INSERT INTO
   nexmark_q5
