@@ -5,6 +5,7 @@ common_base_packages:
   - git
   - python3
   - python3-pip
+  - python3-venv
 
 # Extra packages per node class (set node_class host var)
 common_cloud_packages:
@@ -40,6 +41,10 @@ docker_pull_always: true
 
 # Pruning can be very slow on cloud nodes; keep disabled by default.
 docker_prune_before_pull: false
+
+latency_python_packages:
+  - numpy
+  - polars
 
 wireguard_package_map:
   Debian: wireguard

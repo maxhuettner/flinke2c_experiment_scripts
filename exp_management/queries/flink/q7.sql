@@ -3,7 +3,8 @@ CREATE TABLE nexmark_q7 (
   bidder  BIGINT,
   price  BIGINT,
   `dateTime`  TIMESTAMP(3),
-  extra  VARCHAR
+  extra  VARCHAR,
+  latency_ts BIGINT
 ) WITH (
   'connector' = 'tcp-sink',
   'host' = '10.10.0.10',
@@ -11,7 +12,7 @@ CREATE TABLE nexmark_q7 (
 );
 
 INSERT INTO nexmark_q7
-SELECT B.auction, B.price, B.bidder, B.`dateTime`, B.extra
+SELECT B.auction, B.price, B.bidder, B.`dateTime`, B.extra, B.latency_ts
 from bids B
 JOIN (
   SELECT MAX(price) AS maxprice, window_end as `dateTime`

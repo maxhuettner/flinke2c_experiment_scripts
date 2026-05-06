@@ -1,5 +1,9 @@
 CREATE TABLE
-  nexmark_q5 (auction BIGINT, num BIGINT)
+  nexmark_q5 (
+    auction BIGINT,
+    num BIGINT,
+    latency_ts BIGINT
+  )
 WITH (
   'connector' = 'tcp-sink',
   'host' = '10.10.0.10',
@@ -10,12 +14,14 @@ INSERT INTO
   nexmark_q5
 SELECT
   AuctionBids.auction,
-  AuctionBids.num
+  AuctionBids.num,
+  AuctionBids.latency_ts
 FROM
   (
     SELECT
       auction,
       count(*) AS num,
+      MAX(latency_ts) AS latency_ts,
       window_start AS starttime,
       window_end AS endtime
     FROM

@@ -2,7 +2,8 @@ CREATE TABLE nexmark_q3 (
   name  VARCHAR,
   city  VARCHAR,
   state  VARCHAR,
-  id  BIGINT
+  id  BIGINT,
+  latency_ts BIGINT
 ) WITH (
   'connector' = 'tcp-sink',
   'host' = '10.10.0.10',
@@ -11,7 +12,14 @@ CREATE TABLE nexmark_q3 (
 
 INSERT INTO nexmark_q3
 SELECT
-    P.name, P.city, P.state, A.id
+    P.name,
+    P.city,
+    P.state,
+    A.id,
+    CASE
+        WHEN A.latency_ts >= P.latency_ts THEN A.latency_ts
+        ELSE P.latency_ts
+    END AS latency_ts
 FROM
     auctions AS A INNER JOIN persons AS P on A.seller = P.id
 WHERE

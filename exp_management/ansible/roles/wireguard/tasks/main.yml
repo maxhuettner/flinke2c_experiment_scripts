@@ -200,6 +200,8 @@
       ansible.builtin.command:
         argv:
           - iptables
+          - -w
+          - "5"
           - -t
           - nat
           - -C
@@ -219,6 +221,8 @@
       ansible.builtin.command:
         argv:
           - iptables
+          - -w
+          - "5"
           - -t
           - nat
           - -A

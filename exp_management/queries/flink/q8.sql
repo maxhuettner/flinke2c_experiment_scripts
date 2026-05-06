@@ -1,7 +1,8 @@
 CREATE TABLE nexmark_q8 (
   id  BIGINT,
   name  VARCHAR,
-  stime  TIMESTAMP(3)
+  stime  TIMESTAMP(3),
+  latency_ts BIGINT
 ) WITH (
   'connector' = 'tcp-sink',
   'host' = '10.10.0.10',
@@ -9,19 +10,31 @@ CREATE TABLE nexmark_q8 (
 );
 
 INSERT INTO nexmark_q8
-SELECT P.id, P.name, P.starttime
+SELECT
+  P.id,
+  P.name,
+  P.starttime,
+  CASE
+    WHEN P.latency_ts >= A.latency_ts THEN P.latency_ts
+    ELSE A.latency_ts
+  END AS latency_ts
 FROM (
-  SELECT id, name,
-        window_start AS starttime,
-        window_end AS endtime
+  SELECT
+    id,
+    name,
+    MAX(latency_ts) AS latency_ts,
+    window_start AS starttime,
+    window_end AS endtime
   FROM TABLE(
             TUMBLE(TABLE persons, DESCRIPTOR(`dateTime`), INTERVAL '10' SECOND))
   GROUP BY id, name, window_start, window_end
 ) P
 JOIN (
-  SELECT seller,
-        window_start AS starttime,
-        window_end AS endtime
+  SELECT
+    seller,
+    MAX(latency_ts) AS latency_ts,
+    window_start AS starttime,
+    window_end AS endtime
   FROM TABLE(
         TUMBLE(TABLE auctions, DESCRIPTOR(`dateTime`), INTERVAL '10' SECOND))
   GROUP BY seller, window_start, window_end

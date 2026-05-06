@@ -1,3 +1,8 @@
+- name: Gather minimal facts
+  ansible.builtin.setup:
+    gather_subset:
+      - min
+
 - name: Refresh apt cache
   ansible.builtin.apt:
     update_cache: true
@@ -20,6 +25,25 @@
     group: root
     mode: "0644"
 
+- name: Install Ubuntu repository helper packages
+  ansible.builtin.apt:
+    name:
+      - software-properties-common
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+    lock_timeout: 300
+  when: ansible_facts['distribution'] == "Ubuntu"
+
+- name: Enable Ubuntu universe repository
+  ansible.builtin.command: add-apt-repository -y universe
+  register: common_add_universe
+  changed_when: "'Adding component(s)' in (common_add_universe.stdout | default(''))"
+  when: ansible_facts['distribution'] == "Ubuntu"
+
 - name: Install base packages
   ansible.builtin.apt:
     name: "{{ common_base_packages }}"
@@ -29,6 +53,54 @@
     lock_timeout: 300
   when: common_base_packages | length > 0
 
+- name: Check Python pip availability
+  ansible.builtin.command: python3 -m pip --version
+  register: common_python_pip_check
+  changed_when: false
+
+- name: Fail when Python pip is unavailable
+  ansible.builtin.fail:
+    msg: >-
+      Python pip must be installed on {{ inventory_hostname }}, but
+      `python3 -m pip --version` failed after package installation.
+  when: common_python_pip_check.rc != 0
+
+- name: Ensure latency tools directory exists
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user | default('ubuntu') }}/sim-tools"
+    state: directory
+    owner: "{{ ansible_user | default('ubuntu') }}"
+    group: "{{ ansible_user | default('ubuntu') }}"
+    mode: "0755"
+  when:
+    - (hostvars[inventory_hostname].node_type | default('') | lower) == 'sink'
+
+- name: Create latency Python virtualenv
+  ansible.builtin.command:
+    cmd: "python3 -m venv /home/{{ ansible_user | default('ubuntu') }}/sim-tools/latency-venv"
+    creates: "/home/{{ ansible_user | default('ubuntu') }}/sim-tools/latency-venv/bin/python"
+  when:
+    - (hostvars[inventory_hostname].node_type | default('') | lower) == 'sink'
+
+- name: Ensure latency Python virtualenv ownership
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user | default('ubuntu') }}/sim-tools/latency-venv"
+    state: directory
+    owner: "{{ ansible_user | default('ubuntu') }}"
+    group: "{{ ansible_user | default('ubuntu') }}"
+    recurse: true
+  when:
+    - (hostvars[inventory_hostname].node_type | default('') | lower) == 'sink'
+
+- name: Install latency preprocessing Python packages
+  ansible.builtin.pip:
+    name: "{{ latency_python_packages }}"
+    state: present
+    virtualenv: "/home/{{ ansible_user | default('ubuntu') }}/sim-tools/latency-venv"
+    virtualenv_command: "python3 -m venv"
+  when:
+    - (hostvars[inventory_hostname].node_type | default('') | lower) == 'sink'
+
 - name: Check Docker CLI availability
   ansible.builtin.command: docker --version
   register: docker_check_initial
@@ -37,9 +109,22 @@
 
 - name: Install Docker engine
   ansible.builtin.apt:
-    name: "{{ docker_package_name | default('docker.io') }}"
+    name:
+      - "{{ docker_package_name | default('docker.io') }}"
     state: present
+    update_cache: true
+    cache_valid_time: 86400
+    lock_timeout: 300
   register: docker_install_result
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - docker_check_initial.rc != 0
+
+- name: Re-check Docker CLI after installation
+  ansible.builtin.command: docker --version
+  register: docker_check_after_install
+  changed_when: false
   when:
     - node_class is defined
     - node_class == 'cloud'
@@ -53,7 +138,7 @@
   when:
     - node_class is defined
     - node_class == 'cloud'
-    - docker_check_initial.rc == 0 or (docker_install_result is defined and docker_install_result is changed)
+    - docker_check_initial.rc == 0 or (docker_check_after_install is defined and docker_check_after_install.rc == 0)
 
 - name: Re-check Docker CLI availability
   ansible.builtin.command: docker --version
@@ -176,6 +261,19 @@
     - node_class == 'cloud'
     - "'awscli' in common_cloud_packages"
     - awscli_apt_result is failed
+    - common_python_pip_check.rc == 0
+
+- name: Fail when awscli requires pip but Python pip is unavailable
+  ansible.builtin.fail:
+    msg: >-
+      awscli apt installation was unavailable on {{ inventory_hostname }}, and Python pip
+      is also unavailable. apt stderr: {{ awscli_apt_result.stderr | default('') | trim }}
+  when:
+    - node_class is defined
+    - node_class == 'cloud'
+    - "'awscli' in common_cloud_packages"
+    - awscli_apt_result is failed
+    - common_python_pip_check.rc != 0
 
 - name: Install on-prem specific packages
   ansible.builtin.apt:

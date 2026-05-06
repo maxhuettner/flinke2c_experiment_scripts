@@ -369,12 +369,18 @@ def run_cmd(topology_file: str, command: str, nodes: tuple[str, ...]) -> None:
     default=None,
     help="Optional repetition number forwarded to source/sink containers",
 )
+@click.option(
+    "--latency",
+    is_flag=True,
+    help="Forward --latency to source/sink containers",
+)
 def experiment_cmd(
     topology_file: str,
     experiments_file: str,
     output_dir: str,
     skip_data_upload: bool,
     start_with_rep: int | None,
+    latency: bool,
 ) -> None:
     """Run a batch of streaming experiments on the provisioned nodes.
 
@@ -416,6 +422,7 @@ def experiment_cmd(
                 passphrase=passphrase,
                 skip_data_upload=skip_data_upload,
                 start_with_rep=start_with_rep,
+                latency=latency,
             )
         )
     except RuntimeError as exc:

@@ -25,7 +25,8 @@ Usage:
         -e exp_management/experiments.yml \\
         [-o results/] \\
         [--skip-data-upload] \\
-        [--start-with-rep N]
+        [--start-with-rep N] \\
+        [--latency]
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import asyncio
 import json as _json
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -56,6 +58,10 @@ QUERY_CONFIG_FILE = CONFIGS_DIR / "query_config.yml"
 SOURCE_DATA_DIR   = Path("exp_management/source_data")
 FLINK_LIB_DIR     = Path("lib")
 ANSIBLE_INVENTORY = Path("exp_management/ansible/inventory/generated_hosts.yml")
+SCRIPTS_DIR       = Path("scripts")
+CSV_TO_PARQUET_SCRIPT = SCRIPTS_DIR / "convert_csv_to_parquet.py"
+DOWNSAMPLE_LATENCY_SCRIPT = SCRIPTS_DIR / "downsample_latency_parquet.py"
+REMOTE_LATENCY_PYTHON_PACKAGES = ("numpy", "polars")
 
 FLINK_IMAGE = "maxhue/flinke2c:latest"
 TCP_IMAGE   = "maxhue/tcp-streaming"
@@ -73,6 +79,7 @@ POLL_INTERVAL  = 3     # seconds between docker-logs polls
 READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
 FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
+FLINK_EXPERIMENT_MAX_RETRIES = int(os.getenv("SIM_FLINK_EXPERIMENT_MAX_RETRIES", "2"))
 TRACE_REMOTE_TIMINGS = (
     os.getenv("SIM_TRACE_REMOTE_TIMINGS", "").strip().lower() in ("1", "true", "yes")
 )
@@ -99,6 +106,10 @@ class NodeInfo:
     node_type: str  # "source" / "sink" / "compute"
     address: str    # overlay/topology address
     speed: Optional[int] = None  # CPU cap in % (e.g. 50 → --cpus 0.50)
+
+
+class FlinkJobRetryableError(RuntimeError):
+    """A Flink job entered a retry-worthy failure state."""
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
@@ -235,6 +246,269 @@ async def _upload_text(
     async with conn.start_sftp_client() as sftp:
         async with await sftp.open(remote_path, "w") as fh:
             await fh.write(content)
+
+
+async def _upload_local_text_file(
+    conn: asyncssh.SSHClientConnection, local_path: Path, remote_path: str
+) -> None:
+    await _upload_text(conn, local_path.read_text(), remote_path)
+
+
+def _print_remote_output(prefix: str, output: str, *, stream: Any = sys.stdout) -> None:
+    for line in output.splitlines():
+        line = line.strip()
+        if line:
+            print(f"  [{prefix}] {line}", file=stream)
+
+
+async def _ensure_remote_latency_python_environment(
+    conn: asyncssh.SSHClientConnection,
+    *,
+    node_label: str,
+    node_home: str,
+) -> Optional[str]:
+    """Ensure the remote node can run the latency preprocessing scripts."""
+    remote_tools_dir = f"{node_home}/sim-tools"
+    await _ensure_remote_dir(conn, remote_tools_dir)
+    venv_dir = f"{remote_tools_dir}/latency-venv"
+    venv_python = f"{venv_dir}/bin/python"
+    module_list = ", ".join(REMOTE_LATENCY_PYTHON_PACKAGES)
+    check_cmd = lambda python_exec: (
+        shlex.quote(python_exec) + " -c " + shlex.quote(f"import {module_list}")
+    )
+    create_venv_cmd = f"rm -rf {shlex.quote(venv_dir)} && python3 -m venv {shlex.quote(venv_dir)}"
+
+    check_result = await conn.run(check_cmd("python3"), check=False)
+    if check_result.exit_status == 0:
+        return "python3"
+
+    venv_check_result = await conn.run(check_cmd(venv_python), check=False)
+    if venv_check_result.exit_status == 0:
+        return venv_python
+
+    venv_support_check = await conn.run("python3 -m venv --help", check=False)
+    if venv_support_check.exit_status != 0:
+        print(f"  [{node_label}/latency-python] Installing Python venv packages...")
+        venv_install = await conn.run(
+            (
+                "sudo -n apt-get update && "
+                "sudo -n apt-get install -y python3-venv python3-full"
+            ),
+            check=False,
+        )
+        if venv_install.stdout:
+            _print_remote_output(f"{node_label}/latency-python", venv_install.stdout)
+        if venv_install.exit_status != 0:
+            _print_remote_output(
+                f"{node_label}/latency-python",
+                venv_install.stderr or "python3-venv installation failed",
+                stream=sys.stderr,
+            )
+            return None
+
+    print(
+        f"  [{node_label}/latency-python] Creating latency virtualenv and installing: "
+        f"{', '.join(REMOTE_LATENCY_PYTHON_PACKAGES)}"
+    )
+    create_venv = await conn.run(create_venv_cmd, check=False)
+    if create_venv.exit_status != 0:
+        print(f"  [{node_label}/latency-python] Venv creation failed; installing additional Python venv packages...")
+        repair_install = await conn.run(
+            (
+                "sudo -n apt-get update && "
+                "sudo -n apt-get install -y python3-venv python3-full"
+            ),
+            check=False,
+        )
+        if repair_install.stdout:
+            _print_remote_output(f"{node_label}/latency-python", repair_install.stdout)
+        if repair_install.exit_status != 0:
+            _print_remote_output(
+                f"{node_label}/latency-python",
+                repair_install.stderr or "python venv package installation failed",
+                stream=sys.stderr,
+            )
+            _print_remote_output(
+                f"{node_label}/latency-python",
+                create_venv.stderr or create_venv.stdout or "virtualenv creation failed",
+                stream=sys.stderr,
+            )
+            return None
+
+        create_venv = await conn.run(create_venv_cmd, check=False)
+        if create_venv.exit_status != 0:
+            _print_remote_output(
+                f"{node_label}/latency-python",
+                create_venv.stderr or create_venv.stdout or "virtualenv creation failed",
+                stream=sys.stderr,
+            )
+            return None
+
+    install_cmd = " ".join([
+        shlex.quote(venv_python),
+        "-m pip install --disable-pip-version-check",
+        *REMOTE_LATENCY_PYTHON_PACKAGES,
+    ])
+    install_result = await conn.run(install_cmd, check=False)
+    if install_result.stdout:
+        _print_remote_output(f"{node_label}/latency-python", install_result.stdout)
+    if install_result.exit_status != 0:
+        _print_remote_output(
+            f"{node_label}/latency-python",
+            install_result.stderr or "package installation failed",
+                stream=sys.stderr,
+            )
+        return None
+
+    recheck_result = await conn.run(check_cmd(venv_python), check=False)
+    if recheck_result.exit_status != 0:
+        _print_remote_output(
+            f"{node_label}/latency-python",
+            recheck_result.stderr or "package import check failed after install",
+            stream=sys.stderr,
+        )
+        return None
+    return venv_python
+
+
+async def _ensure_remote_path_writable(
+    conn: asyncssh.SSHClientConnection,
+    *,
+    node_label: str,
+    remote_path: str,
+    remote_user: str,
+) -> bool:
+    """Ensure the remote path is writable by the SSH user."""
+    quoted_path = shlex.quote(remote_path)
+    quoted_user = shlex.quote(remote_user)
+    chown_cmd = f"sudo -n chown -R {quoted_user}:{quoted_user} {quoted_path}"
+    chmod_cmd = f"sudo -n chmod -R u+rwX {quoted_path}"
+
+    chown_result = await conn.run(chown_cmd, check=False)
+    if chown_result.exit_status != 0:
+        _print_remote_output(
+            f"{node_label}/latency-perms",
+            chown_result.stderr or "chown failed",
+            stream=sys.stderr,
+        )
+        return False
+
+    chmod_result = await conn.run(chmod_cmd, check=False)
+    if chmod_result.exit_status != 0:
+        _print_remote_output(
+            f"{node_label}/latency-perms",
+            chmod_result.stderr or "chmod failed",
+            stream=sys.stderr,
+        )
+        return False
+
+    return True
+
+
+async def _run_remote_latency_preprocessing(
+    conn: asyncssh.SSHClientConnection,
+    *,
+    node_label: str,
+    node_home: str,
+    remote_logs: str,
+    remote_user: str,
+) -> None:
+    """Best-effort remote latency log shrinking before download."""
+    if not CSV_TO_PARQUET_SCRIPT.exists() or not DOWNSAMPLE_LATENCY_SCRIPT.exists():
+        print("  warning: latency preprocessing scripts are missing locally; skipping")
+        return
+
+    quoted_logs = shlex.quote(remote_logs)
+    csv_probe = await conn.run(
+        f"find {quoted_logs} -type f -name '*latency*.csv' -print -quit 2>/dev/null",
+        check=False,
+    )
+    parquet_probe = await conn.run(
+        f"find {quoted_logs} -type f -name '*latency*.parquet' -print -quit 2>/dev/null",
+        check=False,
+    )
+    if not (csv_probe.stdout or "").strip() and not (parquet_probe.stdout or "").strip():
+        print(f"  No remote latency files found on {node_label}; skipping preprocessing.")
+        return
+
+    python_exec = await _ensure_remote_latency_python_environment(
+        conn,
+        node_label=node_label,
+        node_home=node_home,
+    )
+    if python_exec is None:
+        print(
+            f"  warning: remote latency preprocessing dependencies are unavailable on "
+            f"{node_label}; skipping preprocessing."
+        )
+        return
+    if not await _ensure_remote_path_writable(
+        conn,
+        node_label=node_label,
+        remote_path=remote_logs,
+        remote_user=remote_user,
+    ):
+        print(
+            f"  warning: remote latency log path is not writable on {node_label}; "
+            "skipping preprocessing."
+        )
+        return
+
+    remote_tools_dir = f"{node_home}/sim-tools"
+    await _ensure_remote_dir(conn, remote_tools_dir)
+    remote_convert_script = f"{remote_tools_dir}/{CSV_TO_PARQUET_SCRIPT.name}"
+    remote_downsample_script = f"{remote_tools_dir}/{DOWNSAMPLE_LATENCY_SCRIPT.name}"
+    await asyncio.gather(
+        _upload_local_text_file(conn, CSV_TO_PARQUET_SCRIPT, remote_convert_script),
+        _upload_local_text_file(conn, DOWNSAMPLE_LATENCY_SCRIPT, remote_downsample_script),
+    )
+
+    if (csv_probe.stdout or "").strip():
+        convert_cmd = " ".join([
+            shlex.quote(python_exec),
+            shlex.quote(remote_convert_script),
+            quoted_logs,
+            "--pattern",
+            shlex.quote("*latency*.csv"),
+            "--remove-csv",
+        ])
+        result = await conn.run(convert_cmd, check=False)
+        if result.stdout:
+            _print_remote_output(f"{node_label}/latency-convert", result.stdout)
+        if result.exit_status != 0:
+            _print_remote_output(
+                f"{node_label}/latency-convert",
+                result.stderr or "conversion failed",
+                stream=sys.stderr,
+            )
+        parquet_probe = await conn.run(
+            f"find {quoted_logs} -type f -name '*latency*.parquet' -print -quit 2>/dev/null",
+            check=False,
+        )
+
+    if not (parquet_probe.stdout or "").strip():
+        print(f"  [{node_label}/latency-convert] No latency parquet files produced; skipping downsampling.")
+        return
+
+    downsample_cmd = " ".join([
+        shlex.quote(python_exec),
+        shlex.quote(remote_downsample_script),
+        quoted_logs,
+        "--pattern",
+        shlex.quote("*latency*.parquet"),
+        "--max-p999-rel-error",
+        "0.01",
+        "--no-manifest",
+    ])
+    result = await conn.run(downsample_cmd, check=False)
+    if result.stdout:
+        _print_remote_output(f"{node_label}/latency-downsample", result.stdout)
+    if result.exit_status != 0:
+        _print_remote_output(
+            f"{node_label}/latency-downsample",
+            result.stderr or "downsampling failed",
+            stream=sys.stderr,
+        )
 
 
 
@@ -494,6 +768,21 @@ async def _ensure_remote_dir(conn: asyncssh.SSHClientConnection, path: str) -> N
         )
 
 
+async def _assert_remote_dir_empty(conn: asyncssh.SSHClientConnection, path: str) -> None:
+    """Fail if a remote directory still contains files after cleanup."""
+    find_cmd = f"find {path} -type f -print -quit 2>/dev/null"
+    result = await conn.run(find_cmd, check=False)
+    if result.exit_status != 0:
+        result = await conn.run(f"sudo -n {find_cmd}", check=False)
+
+    leftover = (result.stdout or "").strip()
+    if leftover:
+        raise RuntimeError(
+            f"Remote log directory {path!r} was not empty after cleanup.\n"
+            f"Example leftover file: {leftover}"
+        )
+
+
 async def _wait_flink_taskmanagers_ready(
     snk_conn: asyncssh.SSHClientConnection,
     jm_name: str,
@@ -614,7 +903,7 @@ async def _wait_flink_job_finished(
                     saw_running = True
 
                 if status in {"RESTARTING", "FAILING", "FAILED", "CANCELLING", "CANCELED", "SUSPENDED"}:
-                    raise RuntimeError(
+                    raise FlinkJobRetryableError(
                         f"Flink job {job_id} entered terminal/error state {status!r}."
                     )
 
@@ -1144,6 +1433,8 @@ async def _run_flink_experiment(
     qcfg: dict,
     output_dir: Path,
     start_with_rep: Optional[int] = None,
+    latency: bool = False,
+    skip_log_download_on_retryable_failure: bool = False,
 ) -> None:
     per_query  = qcfg.get(exp.query, {})
     task_slots = exp.num_task_slots or per_query.get("num_task_slots", 1)
@@ -1209,6 +1500,7 @@ async def _run_flink_experiment(
     start_with_rep_arg = (
         f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
     )
+    latency_arg = "--latency" if latency else ""
 
     # Kill all containers on each node (dedicated experiment nodes).
     _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
@@ -1228,131 +1520,145 @@ async def _run_flink_experiment(
         for wn in worker_nodes
     )
     await asyncio.gather(*clear_jobs)
-
-    # Upload Flink configs once
-    print("  Uploading Flink configs...")
-    await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/flinke2c-conf/config.yaml")
-    for wn in worker_nodes:
-        await _upload_text(
-            worker_conns[wn.id], worker_cfgs[wn.id],
-            f"{worker_homes[wn.id]}/flinke2c-conf/config.yaml",
-        )
-
-    if exp.placement_method and graphml_content is not None:
-        print(f"  Uploading graphml ({graphml_filename})...")
-        await _upload_text(
-            snk_conn, graphml_content,
-            f"{snk_home}/flinke2c-conf/{graphml_filename}",
-        )
-
-    # Start all containers — they stay up for every repetition
-    print("  Starting bid source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {bid_name}",
-        f"-v {src_home}/logs/bids:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/bid_events.parquet",
-        f"--address 0.0.0.0:10000 {system_flag} --schema bid --exp-name {exp.name}",
-        start_with_rep_arg,
-        bid_extra,
-    ])).strip())
-    await _assert_running(src_conn, bid_name)
-
-    print("  Starting auction source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {auction_name}",
-        f"-v {src_home}/logs/auctions:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/auction_events.parquet",
-        f"--address 0.0.0.0:10001 {system_flag} --schema auction --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(src_conn, auction_name)
-
-    print("  Starting person source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {person_name}",
-        f"-v {src_home}/logs/persons:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/person_events.parquet",
-        f"--address 0.0.0.0:10002 {system_flag} --schema person --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(src_conn, person_name)
-
-    print("  Starting sink...")
-    await _run(snk_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {sink_name}",
-        f"-v {snk_home}/logs:/opt/tcp/logs",
-        TCP_IMAGE,
-        f"sink --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(snk_conn, sink_name)
-
-    jm_lib_mounts = " ".join(
-        f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
-        for j in lib_jars
+    verify_jobs = [
+        _assert_remote_dir_empty(src_conn, f"{src_home}/logs/"),
+        _assert_remote_dir_empty(snk_conn, f"{snk_home}/logs/"),
+    ]
+    verify_jobs.extend(
+        _assert_remote_dir_empty(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
     )
-    print("  Starting Flink jobmanager...")
-    await _run(snk_conn, " ".join(filter(None, [
-        "docker run --privileged -d --network=host",
-        f"--name {jm_name}",
-        f"-v {snk_home}/flinke2c-conf:/conf/",
-        jm_lib_mounts,
-        FLINK_IMAGE,
-        "jobmanager",
-    ])))
-
-    print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
-    async def _start_taskmanager(wn: NodeInfo) -> None:
-        wh = worker_homes[wn.id]
-        tm_lib_mounts = " ".join(
-            f"-v {wh}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
-            for j in lib_jars
-        )
-        await _run(worker_conns[wn.id], " ".join(filter(None, [
-            "docker run --privileged -d --network=host",
-            f"--name {tm_names[wn.id]}",
-            _cpus_flag(wn),
-            f"-v {wh}/flinke2c-conf:/conf/",
-            tm_lib_mounts,
-            FLINK_IMAGE,
-            "taskmanager",
-        ])))
-        await _assert_running(worker_conns[wn.id], tm_names[wn.id])
-
-    await asyncio.gather(*(_start_taskmanager(wn) for wn in worker_nodes))
-
-    # Wait for sources to finish loading and for the cluster to form
-    print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
-    await asyncio.gather(
-        _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=bid_name),
-        _poll_for_pattern(src_conn, auction_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=auction_name),
-        _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=person_name),
-    )
-    print("  Sources are ready.")
-    print(f"  Waiting for Flink REST to report {len(worker_nodes)} taskmanager(s)...")
-    await _wait_flink_taskmanagers_ready(
-        snk_conn=snk_conn,
-        jm_name=jm_name,
-        expected_count=len(worker_nodes),
-    )
-    print("  Flink cluster is ready.")
+    await asyncio.gather(*verify_jobs)
 
     worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
 
+    download_logs = True
     try:
+        # Upload Flink configs once
+        print("  Uploading Flink configs...")
+        await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/flinke2c-conf/config.yaml")
+        for wn in worker_nodes:
+            await _upload_text(
+                worker_conns[wn.id], worker_cfgs[wn.id],
+                f"{worker_homes[wn.id]}/flinke2c-conf/config.yaml",
+            )
+
+        if exp.placement_method and graphml_content is not None:
+            print(f"  Uploading graphml ({graphml_filename})...")
+            await _upload_text(
+                snk_conn, graphml_content,
+                f"{snk_home}/flinke2c-conf/{graphml_filename}",
+            )
+
+        # Start all containers — they stay up for every repetition
+        print("  Starting bid source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {bid_name}",
+            f"-v {src_home}/logs/bids:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/bid_events.parquet",
+            f"--address 0.0.0.0:10000 {system_flag} --schema bid --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+            bid_extra,
+        ])).strip())
+        await _assert_running(src_conn, bid_name)
+
+        print("  Starting auction source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {auction_name}",
+            f"-v {src_home}/logs/auctions:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/auction_events.parquet",
+            f"--address 0.0.0.0:10001 {system_flag} --schema auction --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, auction_name)
+
+        print("  Starting person source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {person_name}",
+            f"-v {src_home}/logs/persons:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/person_events.parquet",
+            f"--address 0.0.0.0:10002 {system_flag} --schema person --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, person_name)
+
+        print("  Starting sink...")
+        await _run(snk_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {sink_name}",
+            f"-v {snk_home}/logs:/opt/tcp/logs",
+            TCP_IMAGE,
+            f"sink --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(snk_conn, sink_name)
+
+        jm_lib_mounts = " ".join(
+            f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+            for j in lib_jars
+        )
+        print("  Starting Flink jobmanager...")
+        await _run(snk_conn, " ".join(filter(None, [
+            "docker run --privileged -d --network=host",
+            f"--name {jm_name}",
+            f"-v {snk_home}/flinke2c-conf:/conf/",
+            jm_lib_mounts,
+            FLINK_IMAGE,
+            "jobmanager",
+        ])))
+
+        print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
+        async def _start_taskmanager(wn: NodeInfo) -> None:
+            wh = worker_homes[wn.id]
+            tm_lib_mounts = " ".join(
+                f"-v {wh}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+                for j in lib_jars
+            )
+            await _run(worker_conns[wn.id], " ".join(filter(None, [
+                "docker run --privileged -d --network=host",
+                f"--name {tm_names[wn.id]}",
+                _cpus_flag(wn),
+                f"-v {wh}/flinke2c-conf:/conf/",
+                tm_lib_mounts,
+                FLINK_IMAGE,
+                "taskmanager",
+            ])))
+            await _assert_running(worker_conns[wn.id], tm_names[wn.id])
+
+        await asyncio.gather(*(_start_taskmanager(wn) for wn in worker_nodes))
+
+        # Wait for sources to finish loading and for the cluster to form
+        print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
+        await asyncio.gather(
+            _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=bid_name),
+            _poll_for_pattern(src_conn, auction_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=auction_name),
+            _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=person_name),
+        )
+        print("  Sources are ready.")
+        print(f"  Waiting for Flink REST to report {len(worker_nodes)} taskmanager(s)...")
+        await _wait_flink_taskmanagers_ready(
+            snk_conn=snk_conn,
+            jm_name=jm_name,
+            expected_count=len(worker_nodes),
+        )
+        print("  Flink cluster is ready.")
+
         for rep in range(1, exp.repetitions + 1):
             await _run_flink_repetition(
                 rep=rep,
@@ -1366,6 +1672,10 @@ async def _run_flink_experiment(
                 combined_sql=combined_sql,
                 lib_jars=lib_jars,
             )
+    except FlinkJobRetryableError:
+        if skip_log_download_on_retryable_failure:
+            download_logs = False
+        raise
     finally:
         print("  Stopping containers...")
         # TCP streaming containers: send 'q', wait 5 s, then force-remove
@@ -1376,14 +1686,35 @@ async def _run_flink_experiment(
         for wn in worker_nodes:
             await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
 
-        # Always download logs — even if a repetition failed
-        print(f"\n  Downloading logs to {output_dir}/...")
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
-        await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
-        print(f"  Logs saved to {output_dir}")
+        if not download_logs:
+            print("  Skipping log download because the experiment will be retried.")
+        else:
+            # Always download logs — even if a repetition failed
+            print("\n  Preprocessing remote latency logs before download...")
+            await asyncio.gather(
+                _run_remote_latency_preprocessing(
+                    src_conn,
+                    node_label=src.id,
+                    node_home=src_home,
+                    remote_logs=f"{src_home}/logs",
+                    remote_user=src.user,
+                ),
+                _run_remote_latency_preprocessing(
+                    snk_conn,
+                    node_label=snk.id,
+                    node_home=snk_home,
+                    remote_logs=f"{snk_home}/logs",
+                    remote_user=snk.user,
+                ),
+            )
+
+            print(f"\n  Downloading logs to {output_dir}/...")
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
+            await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
+            print(f"  Logs saved to {output_dir}")
 
 
 # ── NES experiment logic ──────────────────────────────────────────────────────
@@ -1430,6 +1761,7 @@ async def _run_nes_experiment(
     worker_homes: dict[str, str],
     output_dir: Path,
     start_with_rep: Optional[int] = None,
+    latency: bool = False,
 ) -> None:
     query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
@@ -1460,6 +1792,7 @@ async def _run_nes_experiment(
     start_with_rep_arg = (
         f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
     )
+    latency_arg = "--latency" if latency else ""
 
     # Kill all containers on all nodes
     _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
@@ -1479,116 +1812,129 @@ async def _run_nes_experiment(
         for wn in worker_nodes
     )
     await asyncio.gather(*clear_jobs)
-
-    # Upload NES configs
-    print("  Uploading NES configs...")
-    await _run(snk_conn, f"mkdir -p {snk_home}/nes-conf")
-    await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/nes-conf/coordinator.yaml")
-    for wn in worker_nodes:
-        wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], f"mkdir -p {wh}/nes-conf", check=False)
-        await _upload_text(worker_conns[wn.id], worker_cfgs[wn.id], f"{wh}/nes-conf/worker.yaml")
-
-    print("  Starting bid source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {bid_name}",
-        f"-v {src_home}/logs/bids:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/bid_events.parquet",
-        f"--address 0.0.0.0:10000 --system nes --schema bid --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(src_conn, bid_name)
-
-    print("  Starting auction source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {auc_name}",
-        f"-v {src_home}/logs/auctions:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/auction_events.parquet",
-        f"--address 0.0.0.0:10001 --system nes --schema auction --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(src_conn, auc_name)
-
-    print("  Starting person source...")
-    await _run(src_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {person_name}",
-        f"-v {src_home}/logs/persons:/opt/tcp/logs",
-        f"-v {src_home}/data:/data:ro",
-        TCP_IMAGE,
-        "source /data/person_events.parquet",
-        f"--address 0.0.0.0:10002 --system nes --schema person --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(src_conn, person_name)
-
-    # Start TCP sink on snk
-    print("  Starting sink...")
-    await _run(snk_conn, " ".join(filter(None, [
-        "docker run --privileged -d -i --init --network=host",
-        f"--name {sink_name}",
-        f"-v {snk_home}/logs:/opt/tcp/logs",
-        TCP_IMAGE,
-        f"sink --exp-name {exp.name}",
-        start_with_rep_arg,
-    ])))
-    await _assert_running(snk_conn, sink_name)
-
-    # Start NES coordinator on snk
-    print("  Starting NES coordinator...")
-    await _run(snk_conn, " ".join([
-        "docker run --privileged -d --init --network=host",
-        f"--name {nes_name}",
-        f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
-        NES_COORDINATOR_IMAGE,
-    ]))
-    await _assert_running(snk_conn, nes_name)
-
-    # Wait for sources to finish loading data
-    print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
-    await asyncio.gather(
-        _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=bid_name),
-        _poll_for_pattern(src_conn, auc_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=auc_name),
-        _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
-                          timeout=READY_TIMEOUT, label=person_name),
+    verify_jobs = [
+        _assert_remote_dir_empty(src_conn, f"{src_home}/logs/"),
+        _assert_remote_dir_empty(snk_conn, f"{snk_home}/logs/"),
+    ]
+    verify_jobs.extend(
+        _assert_remote_dir_empty(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
     )
-    print("  Sources are ready.")
-
-    # Start NES workers on compute nodes
-    print(f"  Starting {len(worker_nodes)} NES worker(s)...")
-    async def _start_nes_worker(wn: NodeInfo) -> None:
-        wh = worker_homes[wn.id]
-        await _run(worker_conns[wn.id], " ".join(filter(None, [
-            "docker run --privileged -d --init --network=host",
-            f"--name {wn_names[wn.id]}",
-            _cpus_flag(wn),
-            f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
-            NES_WORKER_IMAGE,
-        ])))
-        await _assert_running(worker_conns[wn.id], wn_names[wn.id])
-    await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
-
-    expected_nes_nodes = len(worker_nodes) + 1  # +1 for coordinator-local worker
-    print(
-        "  Waiting for NES topology to report "
-        f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
-    )
-    await _wait_nes_topology_workers_ready(
-        snk_conn=snk_conn,
-        nes_name=nes_name,
-        expected_count=expected_nes_nodes,
-    )
-    print("  NES cluster is ready.")
+    await asyncio.gather(*verify_jobs)
 
     try:
+        # Upload NES configs
+        print("  Uploading NES configs...")
+        await _run(snk_conn, f"mkdir -p {snk_home}/nes-conf")
+        await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/nes-conf/coordinator.yaml")
+        for wn in worker_nodes:
+            wh = worker_homes[wn.id]
+            await _run(worker_conns[wn.id], f"mkdir -p {wh}/nes-conf", check=False)
+            await _upload_text(worker_conns[wn.id], worker_cfgs[wn.id], f"{wh}/nes-conf/worker.yaml")
+
+        print("  Starting bid source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {bid_name}",
+            f"-v {src_home}/logs/bids:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/bid_events.parquet",
+            f"--address 0.0.0.0:10000 --system nes --schema bid --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, bid_name)
+
+        print("  Starting auction source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {auc_name}",
+            f"-v {src_home}/logs/auctions:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/auction_events.parquet",
+            f"--address 0.0.0.0:10001 --system nes --schema auction --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, auc_name)
+
+        print("  Starting person source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {person_name}",
+            f"-v {src_home}/logs/persons:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/person_events.parquet",
+            f"--address 0.0.0.0:10002 --system nes --schema person --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, person_name)
+
+        # Start TCP sink on snk
+        print("  Starting sink...")
+        await _run(snk_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {sink_name}",
+            f"-v {snk_home}/logs:/opt/tcp/logs",
+            TCP_IMAGE,
+            f"sink --exp-name {exp.name}",
+            start_with_rep_arg,
+            latency_arg,
+        ])))
+        await _assert_running(snk_conn, sink_name)
+
+        # Start NES coordinator on snk
+        print("  Starting NES coordinator...")
+        await _run(snk_conn, " ".join([
+            "docker run --privileged -d --init --network=host",
+            f"--name {nes_name}",
+            f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
+            NES_COORDINATOR_IMAGE,
+        ]))
+        await _assert_running(snk_conn, nes_name)
+
+        # Wait for sources to finish loading data
+        print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
+        await asyncio.gather(
+            _poll_for_pattern(src_conn, bid_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=bid_name),
+            _poll_for_pattern(src_conn, auc_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=auc_name),
+            _poll_for_pattern(src_conn, person_name, READY_SIGNAL,
+                              timeout=READY_TIMEOUT, label=person_name),
+        )
+        print("  Sources are ready.")
+
+        # Start NES workers on compute nodes
+        print(f"  Starting {len(worker_nodes)} NES worker(s)...")
+        async def _start_nes_worker(wn: NodeInfo) -> None:
+            wh = worker_homes[wn.id]
+            await _run(worker_conns[wn.id], " ".join(filter(None, [
+                "docker run --privileged -d --init --network=host",
+                f"--name {wn_names[wn.id]}",
+                _cpus_flag(wn),
+                f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
+                NES_WORKER_IMAGE,
+            ])))
+            await _assert_running(worker_conns[wn.id], wn_names[wn.id])
+        await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
+
+        expected_nes_nodes = len(worker_nodes) + 1  # +1 for coordinator-local worker
+        print(
+            "  Waiting for NES topology to report "
+            f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
+        )
+        await _wait_nes_topology_workers_ready(
+            snk_conn=snk_conn,
+            nes_name=nes_name,
+            expected_count=expected_nes_nodes,
+        )
+        print("  NES cluster is ready.")
+
         for rep in range(1, exp.repetitions + 1):
             await _run_nes_repetition(
                 rep=rep,
@@ -1607,6 +1953,24 @@ async def _run_nes_experiment(
         await _stop_containers(snk_conn, [nes_name])
         for wn in worker_nodes:
             await _stop_containers(worker_conns[wn.id], [wn_names[wn.id]])
+
+        print("\n  Preprocessing remote latency logs before download...")
+        await asyncio.gather(
+            _run_remote_latency_preprocessing(
+                src_conn,
+                node_label=src.id,
+                node_home=src_home,
+                remote_logs=f"{src_home}/logs",
+                remote_user=src.user,
+            ),
+            _run_remote_latency_preprocessing(
+                snk_conn,
+                node_label=snk.id,
+                node_home=snk_home,
+                remote_logs=f"{snk_home}/logs",
+                remote_user=snk.user,
+            ),
+        )
 
         print(f"\n  Downloading logs to {output_dir}/...")
         if output_dir.exists():
@@ -1627,6 +1991,7 @@ async def run_experiments(
     passphrase: Optional[str] = None,
     skip_data_upload: bool = False,
     start_with_rep: Optional[int] = None,
+    latency: bool = False,
 ) -> None:
     graph = load_topology(topology_file)
     nodes = load_nodes(topology_file)
@@ -1723,26 +2088,51 @@ async def run_experiments(
                     worker_homes=worker_homes,
                     output_dir=output_base / exp.name,
                     start_with_rep=start_with_rep,
+                    latency=latency,
                 )
             elif exp.system == "flink":
-                await _run_flink_experiment(
-                    exp=exp,
-                    topology_file=topology_file,
-                    graph=graph,
-                    src=src,
-                    src_conn=src_conn,
-                    src_home=src_home,
-                    snk_conn=snk_conn,
-                    snk_home=snk_home,
-                    snk=snk,
-                    worker_nodes=worker_nodes,
-                    worker_conns=worker_conns,
-                    worker_homes=worker_homes,
-                    lib_jars=lib_jars,
-                    qcfg=qcfg,
-                    output_dir=output_base / exp.name,
-                    start_with_rep=start_with_rep,
-                )
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        if attempt > 1:
+                            print(
+                                f"  Retrying Flink experiment from scratch "
+                                f"(attempt {attempt}/{FLINK_EXPERIMENT_MAX_RETRIES + 1})..."
+                            )
+                        await _run_flink_experiment(
+                            exp=exp,
+                            topology_file=topology_file,
+                            graph=graph,
+                            src=src,
+                            src_conn=src_conn,
+                            src_home=src_home,
+                            snk_conn=snk_conn,
+                            snk_home=snk_home,
+                            snk=snk,
+                            worker_nodes=worker_nodes,
+                            worker_conns=worker_conns,
+                            worker_homes=worker_homes,
+                            lib_jars=lib_jars,
+                            qcfg=qcfg,
+                            output_dir=output_base / exp.name,
+                            start_with_rep=start_with_rep,
+                            latency=latency,
+                            skip_log_download_on_retryable_failure=(
+                                attempt <= FLINK_EXPERIMENT_MAX_RETRIES
+                            ),
+                        )
+                        break
+                    except FlinkJobRetryableError as exc:
+                        if attempt > FLINK_EXPERIMENT_MAX_RETRIES:
+                            raise RuntimeError(
+                                f"Flink experiment {exp.name!r} failed after "
+                                f"{attempt} attempt(s): {exc}"
+                            ) from exc
+                        print(
+                            f"  Retryable Flink failure detected: {exc}\n"
+                            f"  Re-running experiment {exp.name!r}."
+                        )
             else:
                 raise ValueError(f"Unknown system: {exp.system!r}. Supported: 'flink', 'nes'")
 

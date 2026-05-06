@@ -8,6 +8,7 @@ CREATE TABLE
         state STRING,
         `dateTime` TIMESTAMP(3),
         extra STRING,
+        latency_ts BIGINT,
         WATERMARK FOR `dateTime` AS `dateTime` - INTERVAL '4' SECOND
     )
 WITH
@@ -29,6 +30,7 @@ CREATE TABLE
         seller BIGINT,
         category BIGINT,
         extra STRING,
+        latency_ts BIGINT,
         WATERMARK FOR `dateTime` AS `dateTime` - INTERVAL '4' SECOND
     )
 WITH
