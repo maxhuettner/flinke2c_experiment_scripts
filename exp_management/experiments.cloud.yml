@@ -22,7 +22,7 @@
 # Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
-repetitions: 11
+repetitions: 10
 
 experiments:
   - name: flink_q1_cloud
@@ -137,14 +137,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: cloud.graphml
 
-  - name: nes_q1_cloud
-    system: nes
-    query: q1
+  # - name: nes_q1_cloud
+  #   system: nes
+  #   query: q1
 
-  - name: nes_q4_cloud
-    system: nes
-    query: q4
+  # - name: nes_q4_cloud
+  #   system: nes
+  #   query: q4
 
-  - name: nes_q5_cloud
-    system: nes
-    query: q5
+  # - name: nes_q5_cloud
+  #   system: nes
+  #   query: q5

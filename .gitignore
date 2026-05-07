@@ -6,3 +6,7 @@ results
 .claude
 __pycache__
 network_sim_cli.egg-info
+local_sqljson_profile_iter0
+local_sqljson_custom_iter1
+schedulercfg**
+local_sql.json

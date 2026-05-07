@@ -44,6 +44,8 @@ TERRAFORM_TFVARS = TERRAFORM_DIR / "generated.auto.tfvars.json"
 ANSIBLE_DIR = Path("exp_management/ansible")
 ANSIBLE_INVENTORY = ANSIBLE_DIR / "inventory/generated_hosts.yml"
 ANSIBLE_ONPREM = ANSIBLE_DIR / "inventory/onprem.yml"
+PROMETHEUS_TEMPLATE = Path("config/prometheus/prometheus.yml.j2")
+PROMETHEUS_CONFIG = Path("config/prometheus/prometheus.yml")
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +130,35 @@ def _has_cloud_instances(tfvars: dict) -> bool:
     return bool((tfvars or {}).get("ec2_instances"))
 
 
+def _write_prometheus_config(graph) -> None:
+    """Render the local Prometheus config for capsys taskmanager scraping."""
+    if not PROMETHEUS_TEMPLATE.exists():
+        raise click.ClickException(
+            f"Prometheus template not found at {PROMETHEUS_TEMPLATE}"
+        )
+
+    taskmanager_ips = [
+        attrs["data"].address
+        for _, attrs in graph.nodes(data=True)
+        if attrs["data"].node_type.lower() == "compute"
+    ]
+    rendered_targets = "\n".join(
+        f'          - "{ip}:9100"'
+        for ip in taskmanager_ips
+    ) or "          []"
+
+    template = PROMETHEUS_TEMPLATE.read_text()
+    placeholder = "{{ taskmanager_targets }}"
+    if placeholder not in template:
+        raise click.ClickException(
+            f"Prometheus template at {PROMETHEUS_TEMPLATE} is missing {placeholder}"
+        )
+
+    PROMETHEUS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    PROMETHEUS_CONFIG.write_text(template.replace(placeholder, rendered_targets))
+    print(f"  wrote {PROMETHEUS_CONFIG}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -187,6 +218,7 @@ def setup(topology_file: str) -> None:
         onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
     )
     print(f"  wrote {ANSIBLE_INVENTORY}")
+    _write_prometheus_config(graph)
 
     # 5. Run Ansible to install packages, enable IP forwarding, and configure WireGuard.
     _run(["ansible-playbook", "playbooks/site.yml"], cwd=ANSIBLE_DIR)
@@ -228,6 +260,7 @@ def gen_inventory(topology_file: str) -> None:
         onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
     )
     print(f"  wrote {ANSIBLE_INVENTORY}")
+    _write_prometheus_config(graph)
 
 
 @main.command()
@@ -422,6 +455,65 @@ def experiment_cmd(
                 passphrase=passphrase,
                 skip_data_upload=skip_data_upload,
                 start_with_rep=start_with_rep,
+                latency=latency,
+            )
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command("profile")
+@click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
+@click.option(
+    "-e", "--experiments-file", required=True,
+    help="Path to experiments YAML used to choose the Flink queries to profile",
+)
+@click.option(
+    "--skip-data-upload", is_flag=True,
+    help="Skip uploading source data files (already present on remote node)",
+)
+@click.option(
+    "--latency",
+    is_flag=True,
+    help="Forward --latency to source/sink containers",
+)
+def profile_cmd(
+    topology_file: str,
+    experiments_file: str,
+    skip_data_upload: bool,
+    latency: bool,
+) -> None:
+    """Generate CAPSys schedulercfg files for the Flink queries in EXPERIMENTS_FILE."""
+    from cli.experiment import load_experiments, run_profiles
+
+    ssh_key = _load_ssh_key_path()
+    if not ssh_key:
+        raise click.ClickException(
+            "No SSH key found. Set SSH_KEY_PATH (or ANSIBLE_SSH_KEY_PATH) in .env."
+        )
+    passphrase = os.environ.get("SSH_KEY_PASSPHRASE")
+
+    graph = load_topology(topology_file)
+    _write_prometheus_config(graph)
+
+    try:
+        experiments = load_experiments(experiments_file)
+    except (FileNotFoundError, KeyError, yaml.YAMLError) as exc:
+        raise click.ClickException(f"Failed to load experiments file: {exc}") from exc
+
+    if not experiments:
+        raise click.ClickException("No experiments defined in the experiments file.")
+
+    print(f"Loaded {len(experiments)} experiment(s) from {experiments_file}")
+
+    try:
+        asyncio.run(
+            run_profiles(
+                experiments=experiments,
+                topology_file=topology_file,
+                key_path=ssh_key,
+                passphrase=passphrase,
+                skip_data_upload=skip_data_upload,
                 latency=latency,
             )
         )
