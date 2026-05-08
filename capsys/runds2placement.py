@@ -400,6 +400,11 @@ def runds2placement(RUNITER, RUNID):
         JobGraph.nodes[vid]['oib']=np.mean(JobGraph.nodes[vid]['_oib'])
         JobGraph.nodes[vid]['optimalparallelism']=max(1, math.ceil(np.mean(JobGraph.nodes[vid]['_optimalparallelism'])))
         JobGraph.nodes[vid]['maxoptimalparallelism']=max(1, np.amax(JobGraph.nodes[vid]['_optimalparallelism']))
+        # Keep CAPSys placement on the original Flink parallelism instead of
+        # DS2's suggested optimal parallelism. This preserves fixed-parallelism
+        # experiments (e.g. all operators at parallelism 1) while still
+        # retaining DS2 estimates for reporting/debug output.
+        JobGraph.nodes[vid]['placementparallelism']=max(1, JobGraph.nodes[vid]['parallelism'])
 
     # for vid in JobGraph.nodes:
     #     parallelism=JobGraph.nodes[vid]['parallelism']
@@ -439,7 +444,7 @@ def runds2placement(RUNITER, RUNID):
             JobGraph.nodes[vid]['_iocost']=jg.nodes[vid]['_iocost']
 
     for vid in JobGraph.nodes:
-        effective_parallelism = max(1, JobGraph.nodes[vid]['optimalparallelism'])
+        effective_parallelism = max(1, JobGraph.nodes[vid]['placementparallelism'])
         effective_input_rate = first_positive(JobGraph.nodes[vid]['tips'])
         effective_output_rate = first_positive(JobGraph.nodes[vid]['tops'])
 

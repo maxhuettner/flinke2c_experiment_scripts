@@ -442,7 +442,9 @@ class DFSprocess:
 
         # convert JobGarph to numtasks
         for gn in self.JobGraph.nodes.items():
-            parallelism = nx.get_node_attributes(self.JobGraph, 'optimalparallelism')
+            placementparallelism = nx.get_node_attributes(self.JobGraph, 'placementparallelism')
+            optimalparallelism = nx.get_node_attributes(self.JobGraph, 'optimalparallelism')
+            originalparallelism = nx.get_node_attributes(self.JobGraph, 'parallelism')
             pname = nx.get_node_attributes(self.JobGraph, 'pname')
             # cost
             state = nx.get_node_attributes(self.JobGraph, 'iocost')
@@ -456,7 +458,11 @@ class DFSprocess:
             upNode = list(self.JobGraph.predecessors(gn[0]))
 
             # key and 'name' all should be unique. NodePlacement key is the name string
-            self.numtasks[gn[0]] = {'name':pname[gn[0]], 'parallelism':parallelism[gn[0]], 'state':state[gn[0]], 'compute': compute[gn[0]],
+            parallelism = placementparallelism.get(
+                gn[0],
+                optimalparallelism.get(gn[0], originalparallelism[gn[0]])
+            )
+            self.numtasks[gn[0]] = {'name':pname[gn[0]], 'parallelism':parallelism, 'state':state[gn[0]], 'compute': compute[gn[0]],
                             'network': network[gn[0]], 'outboundtype': outboundtype[gn[0]], 'downNode': downNode, 'upNode': upNode}
 
         # Validate the computation graph structure
