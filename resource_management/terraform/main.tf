@@ -149,6 +149,9 @@ resource "aws_instance" "nodes" {
   instance_type = each.value.instance_type
   private_ip    = each.value.private_ip
   subnet_id     = each.value.subnet_id == null ? aws_subnet.public.id : each.value.subnet_id
+  source_dest_check = (
+    each.value.source_dest_check == null ? true : each.value.source_dest_check
+  )
   key_name = (
     each.value.key_name != null ? each.value.key_name :
     length(aws_key_pair.generated) > 0 ? aws_key_pair.generated[0].key_name : var.ssh_key_name

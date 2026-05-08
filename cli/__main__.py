@@ -266,7 +266,7 @@ def gen_inventory(topology_file: str) -> None:
 @main.command()
 @click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
 def destroy(topology_file: str) -> None:
-    """Tear down all cloud infrastructure."""
+    """Remove on-prem WireGuard state and tear down cloud infrastructure."""
     graph = load_topology(topology_file)
     ssh_public_key = _load_ssh_public_key()
     aws_region = os.environ.get("AWS_REGION", "eu-central-1")
@@ -277,6 +277,34 @@ def destroy(topology_file: str) -> None:
         raise click.ClickException(str(exc)) from exc
     write_tfvars(TERRAFORM_TFVARS, tfvars)
     print(f"  wrote {TERRAFORM_TFVARS}")
+
+    instance_map: dict = {}
+    if _has_cloud_instances(tfvars):
+        try:
+            outputs = _fetch_terraform_outputs()
+            instance_map = outputs.get("instances", {}).get("value", {})
+        except SystemExit:
+            print("  warning: could not fetch Terraform outputs; continuing with on-prem cleanup only")
+            instance_map = {}
+
+    ansible_user = (
+        os.environ.get("ANSIBLE_CLOUD_SSH_USER")
+        or os.environ.get("CLOUD_SSH_USER")
+        or "ubuntu"
+    )
+    ansible_key = _load_ssh_key_path()
+
+    write_inventory(
+        graph=graph,
+        instance_map=instance_map,
+        ansible_user=ansible_user,
+        ansible_key=ansible_key,
+        output_path=ANSIBLE_INVENTORY,
+        onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
+    )
+    print(f"  wrote {ANSIBLE_INVENTORY}")
+
+    _run(["ansible-playbook", "playbooks/wireguard-cleanup.yml"], cwd=ANSIBLE_DIR)
 
     if not _has_cloud_instances(tfvars):
         print("  no cloud nodes in topology; skipping Terraform destroy")

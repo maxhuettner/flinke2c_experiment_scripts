@@ -1,0 +1,75 @@
+---
+- name: Remove experiment WireGuard interfaces and ECMP route service
+  hosts: onprem
+  strategy: free
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Wait for SSH to become available
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        sleep: 2
+        timeout: 60
+      become: false
+
+    - name: Discover existing WireGuard interfaces
+      ansible.builtin.shell: "ip -o link show | awk -F': ' '$2 ~ /^wg_/ {print $2}'"
+      register: wg_existing_interfaces
+      changed_when: false
+      failed_when: false
+
+    - name: Stop and disable ECMP route service
+      ansible.builtin.service:
+        name: wg-ecmp-routes
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop and disable legacy wg0 service
+      ansible.builtin.service:
+        name: wg-quick@wg0
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop and disable WireGuard services
+      ansible.builtin.service:
+        name: "wg-quick@{{ wg_iface }}"
+        state: stopped
+        enabled: false
+      loop: "{{ wg_existing_interfaces.stdout_lines | default([]) }}"
+      loop_control:
+        loop_var: wg_iface
+      failed_when: false
+      when: (wg_existing_interfaces.stdout_lines | default([])) | length > 0
+
+    - name: Delete WireGuard interfaces
+      ansible.builtin.command: ip link delete {{ wg_iface }}
+      loop: "{{ wg_existing_interfaces.stdout_lines | default([]) }}"
+      loop_control:
+        loop_var: wg_iface
+      register: _wg_delete_result
+      failed_when: false
+      changed_when: _wg_delete_result.rc == 0
+      when: (wg_existing_interfaces.stdout_lines | default([])) | length > 0
+
+    - name: Remove ECMP route service artifacts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/wg-ecmp-routes.service
+        - /etc/wireguard/apply-ecmp-routes.sh
+      failed_when: false
+
+    - name: Remove legacy and generated WireGuard configs
+      ansible.builtin.shell: "find /etc/wireguard -maxdepth 1 -type f \\( -name 'wg_*.conf' -o -name 'wg0.conf' \\) -delete"
+      changed_when: true
+      failed_when: false
+
+    - name: Reload systemd after cleanup
+      ansible.builtin.systemd:
+        daemon_reload: true
+      failed_when: false

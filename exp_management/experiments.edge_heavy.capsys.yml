@@ -25,22 +25,22 @@
 repetitions: 10
 
 experiments:
-  - name: capsys_q1_e2c
+  - name: capsys_q1_edge_heavy
     system: flink
     placement_method: CAPSYS
     query: q1
 
-  - name: capsys_q2_e2c
+  - name: capsys_q2_edge_heavy
     system: flink
     placement_method: CAPSYS
     query: q2
 
-  - name: capsys_q3_e2c
+  - name: capsys_q3_edge_heavy
     system: flink
     placement_method: CAPSYS
     query: q3
 
-  - name: capsys_q4_e2c
+  - name: capsys_q4_edge_heavy
     system: flink
     placement_method: CAPSYS
     query: q4

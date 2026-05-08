@@ -94,6 +94,7 @@ EOT
     subnet_id                   = optional(string)
     key_name                    = optional(string)
     associate_public_ip_address = optional(bool)
+    source_dest_check           = optional(bool)
     security_group_ids          = optional(list(string))
     user_data                   = optional(string)
     iam_instance_profile        = optional(string)

@@ -26,6 +26,37 @@ _DEFAULTS = dict(
 )
 
 
+def _cloud_transit_nodes(graph: nx.Graph) -> set[str]:
+    """Return provisioned cloud nodes that sit on cloud<->on-prem paths.
+
+    These nodes act as transit routers for sink/source or other cloud nodes
+    reaching on-prem nodes over the mixed topology, so EC2 source/dest check
+    must be disabled on them.
+    """
+    provisioned_cloud_nodes = [
+        node_id
+        for node_id in graph.nodes()
+        if graph.nodes[node_id]["data"].should_provision()
+        and not graph.nodes[node_id]["data"].is_on_prem()
+    ]
+    on_prem_nodes = [
+        node_id for node_id in graph.nodes() if graph.nodes[node_id]["data"].is_on_prem()
+    ]
+
+    transit_nodes: set[str] = set()
+    for src in provisioned_cloud_nodes:
+        for dst in on_prem_nodes:
+            try:
+                for path in nx.all_shortest_paths(graph, src, dst):
+                    for node_id in path[1:-1]:
+                        node: TopoNode = graph.nodes[node_id]["data"]
+                        if node.should_provision() and not node.is_on_prem():
+                            transit_nodes.add(node_id)
+            except nx.NetworkXNoPath:
+                continue
+    return transit_nodes
+
+
 def _infer_aws_subnet_for_ips(ips: list[ipaddress.IPv4Address]) -> Optional[ipaddress.IPv4Network]:
     """Return an AWS-valid subnet (/24.. /16) containing all IPs.
 
@@ -71,6 +102,7 @@ def build_tfvars(
     instances: dict = {}
     cloud_private_ips: list[ipaddress.IPv4Address] = []
     cloud_private_ip_by_node: dict[str, ipaddress.IPv4Address] = {}
+    cloud_transit_nodes = _cloud_transit_nodes(graph)
     for node_id in graph.nodes():
         node: TopoNode = graph.nodes[node_id]["data"]
         if not node.should_provision():
@@ -90,6 +122,8 @@ def build_tfvars(
             "instance_type": node.instance_type or default_instance_type,
             "tags": tags,
         }
+        if node_id in cloud_transit_nodes:
+            instance["source_dest_check"] = False
         # Cloud nodes use their topology address as the EC2 private IP so
         # cloud-to-cloud links can use native VPC routing without WireGuard.
         if node.address and not node.is_on_prem():

@@ -194,6 +194,66 @@ def _build_wg_configs(
     )
 
 
+def _cloud_transit_route_commands(graph: nx.Graph, src: str) -> list[str]:
+    """Return static ECMP routes for a cloud node without direct WG interfaces."""
+    src_addr = graph.nodes[src]["data"].address
+    cloud_neighbors = [
+        nbr for nbr in sorted(graph.neighbors(src))
+        if not _is_on_prem_node(graph, nbr)
+    ]
+    if not cloud_neighbors:
+        return []
+
+    commands: list[str] = []
+    for dest in sorted(graph.nodes()):
+        if dest == src or not _is_on_prem_node(graph, dest):
+            continue
+        try:
+            paths = list(nx.all_shortest_paths(graph, src, dest))
+        except nx.NetworkXNoPath:
+            continue
+
+        first_hops = sorted({
+            path[1]
+            for path in paths
+            if len(path) >= 2 and path[1] in cloud_neighbors
+        })
+        if not first_hops:
+            continue
+
+        dest_ip = graph.nodes[dest]["data"].address
+        nexthops = " ".join(
+            f"nexthop via {graph.nodes[hop]['data'].address}"
+            for hop in first_hops
+        )
+        commands.append(f"ip route replace {dest_ip}/32 src {src_addr} {nexthops}")
+
+    return commands
+
+
+def _augment_cloud_transit_routes(
+    graph: nx.Graph,
+    cloud_host_ips: dict[str, str],
+    wg_configs: dict,
+) -> dict:
+    """Add route-only configs for cloud nodes that need transit to on-prem nodes."""
+    augmented = dict(wg_configs)
+    for node_id in sorted(cloud_host_ips):
+        existing = augmented.get(node_id)
+        if existing and existing.get("wireguard_interfaces"):
+            continue
+
+        route_cmds = _cloud_transit_route_commands(graph, node_id)
+        if not route_cmds:
+            continue
+
+        augmented[node_id] = {
+            "wireguard_interfaces": [],
+            "wireguard_ecmp_routes": route_cmds,
+        }
+    return augmented
+
+
 def _build_cloud_entry(
     node_id: str,
     ip: str,
@@ -207,9 +267,12 @@ def _build_cloud_entry(
         entry["node_type"] = graph.nodes[node_id]["data"].node_type.lower()
     if ansible_key:
         entry["ansible_ssh_private_key_file"] = ansible_key
-    if node_id in wg_configs and wg_configs[node_id]["wireguard_interfaces"]:
-        entry["wireguard_interfaces"] = wg_configs[node_id]["wireguard_interfaces"]
-        entry["wireguard_ecmp_routes"] = wg_configs[node_id].get("wireguard_ecmp_routes", [])
+    if node_id in wg_configs:
+        interfaces = wg_configs[node_id].get("wireguard_interfaces", [])
+        routes = wg_configs[node_id].get("wireguard_ecmp_routes", [])
+        if interfaces or routes:
+            entry["wireguard_interfaces"] = interfaces
+            entry["wireguard_ecmp_routes"] = routes
     return entry
 
 
@@ -271,6 +334,7 @@ def write_inventory(
         listen_port=wg_listen_port,
         salt=wg_salt,
     )
+    wg_configs = _augment_cloud_transit_routes(graph, cloud_host_ips, wg_configs)
 
     cloud_hosts: dict = {}
     for node_id, meta in instance_map.items():
