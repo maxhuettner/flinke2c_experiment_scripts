@@ -46,19 +46,19 @@ experiments:
     query: q4
 
   # Not supported by CAPSYS because of the multiple downstream operators
-  # - name: flink_q5_cloud
+  # - name: capsys_q5_edge_heavy
   #   system: flink
   #   placement_method: CAPSYS
   #   query: q5
 
   # Not supported by CAPSYS because of the multiple downstream operators
-  # - name: flink_q7_cloud
+  # - name: capsys_q7_edge_heavy
   #   system: flink
   #   placement_method: CAPSYS
   #   query: q7
 
-  # Placement takes too long to be feasible for the number of repetitions we want to do
-  # - name: flink_q8_cloud
-  #   system: flink
-  #   placement_method: CAPSYS
-  #   query: q8
+  # Placement takes long
+  - name: capsys_q8_edge_heavy
+    system: flink
+    placement_method: CAPSYS
+    query: q8

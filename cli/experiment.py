@@ -1027,12 +1027,22 @@ async def _cancel_flink_job(
 ) -> None:
     """Cancel a Flink job via REST and wait until it disappears or is canceled."""
     result = await snk_conn.run(
-        f"curl -fsS -X PATCH http://127.0.0.1:8081/jobs/{job_id}",
+        f"curl -sS -o /dev/null -w '%{{http_code}}' -X PATCH http://127.0.0.1:8081/jobs/{job_id}",
         check=False,
     )
+    status_code = (result.stdout or "").strip()
     if result.exit_status != 0:
         raise RuntimeError(
             f"Failed to request cancellation for Flink job {job_id}.\n"
+            f"stderr: {(result.stderr or '').strip()}"
+        )
+    if status_code == "409":
+        print(f"  Flink job {job_id}: already finished; ignoring cancel conflict")
+        return
+    if status_code and status_code not in {"200", "202"}:
+        raise RuntimeError(
+            f"Failed to request cancellation for Flink job {job_id}.\n"
+            f"HTTP status: {status_code}\n"
             f"stderr: {(result.stderr or '').strip()}"
         )
 
@@ -2299,20 +2309,20 @@ async def _run_flink_profile_query(
                     "0",
                     "custom",
                 ])
-                await _run_local_command([
-                    capsys_python,
-                    str(CAPSYS_RUNDS_SCRIPT),
-                    str(CAPSYS_CONFIG_OUTPUT),
-                    "plan",
-                    "custom",
-                    "1",
-                    "custom",
-                    output_name,
-                ])
-                print(f"  Generated {CAPSYS_DIR / ('schedulercfg_' + output_name)}")
 
             print(f"  Cancelling Flink job {job_id}...")
             await _cancel_flink_job(snk_conn, job_id)
+            await _run_local_command([
+                capsys_python,
+                str(CAPSYS_RUNDS_SCRIPT),
+                str(CAPSYS_CONFIG_OUTPUT),
+                "plan",
+                "custom",
+                "1",
+                "custom",
+                output_name,
+            ])
+            print(f"  Generated {CAPSYS_DIR / ('schedulercfg_' + output_name)}")
     finally:
         print("  Stopping containers...")
         await _graceful_stop_tcp(src_conn, [bid_name, auction_name, person_name])
