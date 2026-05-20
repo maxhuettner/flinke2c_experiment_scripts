@@ -89,6 +89,8 @@ READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
 FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
 FLINK_JOBMANAGER_START_DELAY = 5  # seconds to wait before starting taskmanagers
+SSH_CONNECT_RETRIES = 3
+SSH_CONNECT_RETRY_DELAY = 5
 FLINK_EXPERIMENT_MAX_RETRIES = int(os.getenv("SIM_FLINK_EXPERIMENT_MAX_RETRIES", "2"))
 TRACE_REMOTE_TIMINGS = (
     os.getenv("SIM_TRACE_REMOTE_TIMINGS", "").strip().lower() in ("1", "true", "yes")
@@ -248,6 +250,36 @@ def _conn_kwargs(node: NodeInfo, key_path: str, passphrase: Optional[str]) -> di
     if passphrase:
         kw["passphrase"] = passphrase
     return kw
+
+
+async def _connect_node(
+    node: NodeInfo,
+    key_path: str,
+    passphrase: Optional[str],
+    *,
+    retries: int = SSH_CONNECT_RETRIES,
+    retry_delay: int = SSH_CONNECT_RETRY_DELAY,
+) -> asyncssh.SSHClientConnection:
+    """Connect to a node with retries and clear diagnostics."""
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            return await asyncssh.connect(**_conn_kwargs(node, key_path, passphrase))
+        except (asyncssh.Error, OSError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt == retries:
+                break
+            print(
+                f"  SSH connect failed for {node.id} ({node.host}) "
+                f"[attempt {attempt}/{retries}]: {exc}. Retrying in {retry_delay}s..."
+            )
+            await asyncio.sleep(retry_delay)
+
+    raise RuntimeError(
+        f"Failed to connect to node {node.id} ({node.host}) after {retries} attempts: "
+        f"{last_exc}"
+    )
 
 
 async def _run(conn: asyncssh.SSHClientConnection, cmd: str, *, check: bool = True) -> str:
@@ -575,6 +607,10 @@ async def _download_logs(
                 print(f"  downloaded {rel}")
             except asyncssh.SFTPError as exc:
                 print(f"  warning: could not download {rel}: {exc}", file=sys.stderr)
+
+
+def _retry_attempt_output_dir(output_dir: Path, attempt: int) -> Path:
+    return output_dir.parent / f"{output_dir.name}__retry_attempt_{attempt}"
 
 
 # ── Container helpers ─────────────────────────────────────────────────────────
@@ -1818,6 +1854,7 @@ async def _run_flink_experiment(
     lib_jars: list[Path],
     qcfg: dict,
     output_dir: Path,
+    attempt: int = 1,
     start_with_rep: Optional[int] = None,
     latency: bool = False,
     skip_log_download_on_retryable_failure: bool = False,
@@ -1928,6 +1965,7 @@ async def _run_flink_experiment(
     worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
 
     download_logs = True
+    retryable_failure = False
     try:
         # Upload Flink configs once
         print("  Uploading Flink configs...")
@@ -2072,8 +2110,7 @@ async def _run_flink_experiment(
                 topology_name=topology_name,
             )
     except FlinkJobRetryableError:
-        if skip_log_download_on_retryable_failure:
-            download_logs = False
+        retryable_failure = True
         raise
     finally:
         print("  Stopping containers...")
@@ -2085,10 +2122,18 @@ async def _run_flink_experiment(
         for wn in worker_nodes:
             await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
 
+        download_target = output_dir
+        if retryable_failure and skip_log_download_on_retryable_failure:
+            download_target = _retry_attempt_output_dir(output_dir, attempt)
+            print(
+                "  Retryable failure detected; downloading preliminary results to "
+                f"{download_target} before retry."
+            )
+
         if not download_logs:
-            print("  Skipping log download because the experiment will be retried.")
+            print("  Skipping log download.")
         else:
-            # Always download logs — even if a repetition failed
+            # Always download logs — even if a repetition failed.
             print("\n  Preprocessing remote latency logs before download...")
             await asyncio.gather(
                 _run_remote_latency_preprocessing(
@@ -2107,13 +2152,13 @@ async def _run_flink_experiment(
                 ),
             )
 
-            print(f"\n  Downloading logs to {output_dir}/...")
-            if output_dir.exists():
-                shutil.rmtree(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
-            await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
-            print(f"  Logs saved to {output_dir}")
+            print(f"\n  Downloading logs to {download_target}/...")
+            if download_target.exists():
+                shutil.rmtree(download_target)
+            download_target.mkdir(parents=True, exist_ok=True)
+            await _download_logs(src_conn, f"{src_home}/logs", download_target / src.id)
+            await _download_logs(snk_conn, f"{snk_home}/logs", download_target / snk.id)
+            print(f"  Logs saved to {download_target}")
 
 
 async def _run_flink_profile_query(
@@ -2755,15 +2800,13 @@ async def run_experiments(
 
     # Open SSH connections
     print("\nConnecting to nodes...")
-    src_conn = await asyncssh.connect(**_conn_kwargs(src, key_path, passphrase))
-    snk_conn = await asyncssh.connect(**_conn_kwargs(snk, key_path, passphrase))
+    src_conn = await _connect_node(src, key_path, passphrase)
+    snk_conn = await _connect_node(snk, key_path, passphrase)
     worker_conns: dict[str, asyncssh.SSHClientConnection] = {}
 
     try:
         for wn in worker_nodes:
-            worker_conns[wn.id] = await asyncssh.connect(
-                **_conn_kwargs(wn, key_path, passphrase)
-            )
+            worker_conns[wn.id] = await _connect_node(wn, key_path, passphrase)
 
         # Resolve home directories for SFTP (~ is not expanded by SFTP protocol)
         src_home = await _get_home(src_conn)
@@ -2849,6 +2892,7 @@ async def run_experiments(
                             lib_jars=lib_jars,
                             qcfg=qcfg,
                             output_dir=output_base / exp.name,
+                            attempt=attempt,
                             start_with_rep=start_with_rep,
                             latency=latency,
                             skip_log_download_on_retryable_failure=(
