@@ -22,30 +22,33 @@
 # Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
-repetitions: 10
+repetitions: 1
 num_task_slots: 1
 bid_src_extra_arg: --num-events 920000
 
 experiments:
-  - name: capsys_q1_wan
-    system: flink
-    placement_method: CAPSYS
-    query: q1
+  # Does not find a plan: Total num of possible plans: 0, no bound found for compute
+  # - name: capsys_q1_wan
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q1
 
-  - name: capsys_q2_wan
-    system: flink
-    placement_method: CAPSYS
-    query: q2
+  # Does not find a plan: Total num of possible plans: 0, no bound found for compute
+  # - name: capsys_q2_wan
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q2
 
-  - name: capsys_q3_wan
-    system: flink
-    placement_method: CAPSYS
-    query: q3
+  # Does not find a plan: Total num of possible plans: 0, no bound found for compute
+  # - name: capsys_q3_wan
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q3
 
-  - name: capsys_q4_wan
-    system: flink
-    placement_method: CAPSYS
-    query: q4
+  # - name: capsys_q4_wan
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q4
 
   # Not supported by CAPSYS because of the multiple downstream operators
   # - name: flink_q5_cloud
@@ -59,8 +62,8 @@ experiments:
   #   placement_method: CAPSYS
   #   query: q7
 
-  # Placement takes long
-  - name: capsys_q8_wan
-    system: flink
-    placement_method: CAPSYS
-    query: q8
+  # Does not find a plan: Total num of possible plans: 0, no bound found for compute
+  # - name: capsys_q8_wan
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q8
