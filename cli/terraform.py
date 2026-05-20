@@ -26,34 +26,75 @@ _DEFAULTS = dict(
 )
 
 
+def _default_tfvars(
+    aws_region: str,
+    vpc_cidr: str,
+    public_subnet_cidr: str,
+    ssh_ingress_cidrs: Optional[list[str]],
+    wireguard_ingress_cidrs: Optional[list[str]],
+    wireguard_udp_port: int,
+    wireguard_udp_port_max: int,
+    ssh_key_pair_name: str,
+    ssh_public_key: Optional[str],
+) -> dict:
+    tfvars: dict = {
+        "aws_region": aws_region,
+        "vpc_cidr": vpc_cidr,
+        "public_subnet_cidr": public_subnet_cidr,
+        "ssh_ingress_cidrs": ssh_ingress_cidrs or _DEFAULTS["ssh_ingress_cidrs"],
+        "wireguard_ingress_cidrs": wireguard_ingress_cidrs or _DEFAULTS["wireguard_ingress_cidrs"],
+        "wireguard_udp_port": wireguard_udp_port,
+        "wireguard_udp_port_max": wireguard_udp_port_max,
+        "ssh_key_pair_name": ssh_key_pair_name,
+        "ec2_instances": {},
+    }
+    if ssh_public_key:
+        tfvars["ssh_public_key"] = ssh_public_key
+    return tfvars
+
+
+def _cloud_nodes_by_region(
+    graph: nx.Graph,
+    default_region: str,
+) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for node_id in graph.nodes():
+        node: TopoNode = graph.nodes[node_id]["data"]
+        if not node.should_provision():
+            continue
+
+        region = node.cloud_region(default_region)
+        if region is None:
+            continue
+        groups.setdefault(region, []).append(node_id)
+
+    return {region: sorted(node_ids) for region, node_ids in sorted(groups.items())}
+
+
 def _cloud_transit_nodes(graph: nx.Graph) -> set[str]:
-    """Return provisioned cloud nodes that sit on cloud<->on-prem paths.
+    """Return provisioned cloud nodes that forward traffic for other nodes.
 
-    These nodes act as transit routers for sink/source or other cloud nodes
-    reaching on-prem nodes over the mixed topology, so EC2 source/dest check
-    must be disabled on them.
+    Any cloud node that appears as an interior hop on a shortest path between
+    two topology nodes may need to route packets that are neither sourced from
+    nor destined to itself. Those EC2 instances must have source/dest check
+    disabled or AWS will drop the forwarded traffic.
     """
-    provisioned_cloud_nodes = [
-        node_id
-        for node_id in graph.nodes()
-        if graph.nodes[node_id]["data"].should_provision()
-        and not graph.nodes[node_id]["data"].is_on_prem()
-    ]
-    on_prem_nodes = [
-        node_id for node_id in graph.nodes() if graph.nodes[node_id]["data"].is_on_prem()
-    ]
-
+    node_ids = sorted(graph.nodes())
     transit_nodes: set[str] = set()
-    for src in provisioned_cloud_nodes:
-        for dst in on_prem_nodes:
+
+    for index, src in enumerate(node_ids):
+        for dst in node_ids[index + 1:]:
             try:
-                for path in nx.all_shortest_paths(graph, src, dst):
-                    for node_id in path[1:-1]:
-                        node: TopoNode = graph.nodes[node_id]["data"]
-                        if node.should_provision() and not node.is_on_prem():
-                            transit_nodes.add(node_id)
+                paths = nx.all_shortest_paths(graph, src, dst)
             except nx.NetworkXNoPath:
                 continue
+
+            for path in paths:
+                for node_id in path[1:-1]:
+                    node: TopoNode = graph.nodes[node_id]["data"]
+                    if node.should_provision() and not node.is_on_prem():
+                        transit_nodes.add(node_id)
+
     return transit_nodes
 
 
@@ -98,15 +139,106 @@ def build_tfvars(
     ssh_key_pair_name: str = _DEFAULTS["ssh_key_pair_name"],
     default_instance_type: str = _DEFAULTS["default_instance_type"],
 ) -> dict:
-    """Build the dict that will be serialised as generated.auto.tfvars.json."""
+    """Build single-region tfvars.
+
+    Multi-region topologies must use ``build_tfvars_by_region``.
+    """
+    tfvars_by_region = build_tfvars_by_region(
+        graph,
+        ssh_public_key=ssh_public_key,
+        aws_region=aws_region,
+        vpc_cidr=vpc_cidr,
+        public_subnet_cidr=public_subnet_cidr,
+        ssh_ingress_cidrs=ssh_ingress_cidrs,
+        wireguard_ingress_cidrs=wireguard_ingress_cidrs,
+        wireguard_udp_port=wireguard_udp_port,
+        wireguard_udp_port_max=wireguard_udp_port_max,
+        ssh_key_pair_name=ssh_key_pair_name,
+        default_instance_type=default_instance_type,
+    )
+    if not tfvars_by_region:
+        return _default_tfvars(
+            aws_region=aws_region,
+            vpc_cidr=vpc_cidr,
+            public_subnet_cidr=public_subnet_cidr,
+            ssh_ingress_cidrs=ssh_ingress_cidrs,
+            wireguard_ingress_cidrs=wireguard_ingress_cidrs,
+            wireguard_udp_port=wireguard_udp_port,
+            wireguard_udp_port_max=wireguard_udp_port_max,
+            ssh_key_pair_name=ssh_key_pair_name,
+            ssh_public_key=ssh_public_key,
+        )
+    if len(tfvars_by_region) > 1:
+        raise ValueError(
+            "Topology spans multiple AWS regions. Use build_tfvars_by_region() "
+            "and provision each region separately."
+        )
+    return next(iter(tfvars_by_region.values()))
+
+
+def build_tfvars_by_region(
+    graph: nx.Graph,
+    ssh_public_key: Optional[str] = None,
+    aws_region: str = _DEFAULTS["aws_region"],
+    vpc_cidr: str = _DEFAULTS["vpc_cidr"],
+    public_subnet_cidr: str = _DEFAULTS["public_subnet_cidr"],
+    ssh_ingress_cidrs: Optional[list[str]] = None,
+    wireguard_ingress_cidrs: Optional[list[str]] = None,
+    wireguard_udp_port: int = _DEFAULTS["wireguard_udp_port"],
+    wireguard_udp_port_max: int = _DEFAULTS["wireguard_udp_port_max"],
+    ssh_key_pair_name: str = _DEFAULTS["ssh_key_pair_name"],
+    default_instance_type: str = _DEFAULTS["default_instance_type"],
+) -> dict[str, dict]:
+    """Build one Terraform tfvars document per AWS region in the topology."""
+    tfvars_by_region: dict[str, dict] = {}
+    cloud_nodes_by_region = _cloud_nodes_by_region(graph, aws_region)
+
+    if not cloud_nodes_by_region:
+        return {}
+
+    cloud_transit_nodes = _cloud_transit_nodes(graph)
+    for region, region_node_ids in cloud_nodes_by_region.items():
+        tfvars_by_region[region] = _build_region_tfvars(
+            graph=graph,
+            node_ids=region_node_ids,
+            transit_nodes=cloud_transit_nodes,
+            ssh_public_key=ssh_public_key,
+            aws_region=region,
+            vpc_cidr=vpc_cidr,
+            public_subnet_cidr=public_subnet_cidr,
+            ssh_ingress_cidrs=ssh_ingress_cidrs,
+            wireguard_ingress_cidrs=wireguard_ingress_cidrs,
+            wireguard_udp_port=wireguard_udp_port,
+            wireguard_udp_port_max=wireguard_udp_port_max,
+            ssh_key_pair_name=ssh_key_pair_name,
+            default_instance_type=default_instance_type,
+        )
+
+    return tfvars_by_region
+
+
+def _build_region_tfvars(
+    graph: nx.Graph,
+    node_ids: list[str],
+    transit_nodes: set[str],
+    ssh_public_key: Optional[str],
+    aws_region: str,
+    vpc_cidr: str,
+    public_subnet_cidr: str,
+    ssh_ingress_cidrs: Optional[list[str]],
+    wireguard_ingress_cidrs: Optional[list[str]],
+    wireguard_udp_port: int,
+    wireguard_udp_port_max: int,
+    ssh_key_pair_name: str,
+    default_instance_type: str,
+) -> dict:
+    """Build the tfvars dict for one Terraform region/state."""
     instances: dict = {}
     cloud_private_ips: list[ipaddress.IPv4Address] = []
     cloud_private_ip_by_node: dict[str, ipaddress.IPv4Address] = {}
-    cloud_transit_nodes = _cloud_transit_nodes(graph)
-    for node_id in graph.nodes():
+
+    for node_id in node_ids:
         node: TopoNode = graph.nodes[node_id]["data"]
-        if not node.should_provision():
-            continue
 
         tags: dict[str, str] = {
             "Name": node_id,
@@ -122,11 +254,11 @@ def build_tfvars(
             "instance_type": node.instance_type or default_instance_type,
             "tags": tags,
         }
-        if node_id in cloud_transit_nodes:
+        if node_id in transit_nodes:
             instance["source_dest_check"] = False
-        # Cloud nodes use their topology address as the EC2 private IP so
-        # cloud-to-cloud links can use native VPC routing without WireGuard.
-        if node.address and not node.is_on_prem():
+        # Cloud nodes use their topology address as the EC2 private IP within
+        # their region-local VPC so same-region links can use native routing.
+        if node.address:
             try:
                 node_ip = ipaddress.IPv4Address(node.address)
                 instance["private_ip"] = node.address
@@ -183,20 +315,18 @@ def build_tfvars(
             "Use addresses not in the first four or last subnet IP (for example 10.10.0.8+)."
         )
 
-    tfvars: dict = {
-        "aws_region": aws_region,
-        "vpc_cidr": effective_vpc_cidr,
-        "public_subnet_cidr": effective_public_subnet_cidr,
-        "ssh_ingress_cidrs": ssh_ingress_cidrs or _DEFAULTS["ssh_ingress_cidrs"],
-        "wireguard_ingress_cidrs": wireguard_ingress_cidrs or _DEFAULTS["wireguard_ingress_cidrs"],
-        "wireguard_udp_port": wireguard_udp_port,
-        "wireguard_udp_port_max": wireguard_udp_port_max,
-        "ssh_key_pair_name": ssh_key_pair_name,
-        "ec2_instances": instances,
-    }
-    if ssh_public_key:
-        tfvars["ssh_public_key"] = ssh_public_key
-
+    tfvars = _default_tfvars(
+        aws_region=aws_region,
+        vpc_cidr=effective_vpc_cidr,
+        public_subnet_cidr=effective_public_subnet_cidr,
+        ssh_ingress_cidrs=ssh_ingress_cidrs,
+        wireguard_ingress_cidrs=wireguard_ingress_cidrs,
+        wireguard_udp_port=wireguard_udp_port,
+        wireguard_udp_port_max=wireguard_udp_port_max,
+        ssh_key_pair_name=ssh_key_pair_name,
+        ssh_public_key=ssh_public_key,
+    )
+    tfvars["ec2_instances"] = instances
     return tfvars
 
 

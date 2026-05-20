@@ -1,0 +1,11 @@
+---
+- name: Reboot AWS cloud nodes after setup
+  hosts: cloud
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Reboot cloud nodes and wait for them to return
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        connect_timeout: 10
+        post_reboot_delay: 5

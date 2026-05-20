@@ -88,6 +88,7 @@ POLL_INTERVAL  = 3     # seconds between docker-logs polls
 READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
 FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
+FLINK_JOBMANAGER_START_DELAY = 5  # seconds to wait before starting taskmanagers
 FLINK_EXPERIMENT_MAX_RETRIES = int(os.getenv("SIM_FLINK_EXPERIMENT_MAX_RETRIES", "2"))
 TRACE_REMOTE_TIMINGS = (
     os.getenv("SIM_TRACE_REMOTE_TIMINGS", "").strip().lower() in ("1", "true", "yes")
@@ -105,6 +106,8 @@ class ExperimentSpec:
     repetitions: int = 1
     placement_method: str = ""      # "" or e.g. "TOP_DOWN"
     num_task_slots: Optional[int] = None
+    bid_src_extra_arg: Optional[str] = None
+    max_query_runtime: Optional[int] = None  # milliseconds; cancel Flink job via REST when exceeded
     graphml_file: str = ""          # explicit graphml filename in coordinator dir, e.g. "cloud.graphml"
 
 
@@ -128,6 +131,9 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     global_repetitions = int(raw.get("repetitions", 1))
+    global_num_task_slots = raw.get("num_task_slots")
+    global_bid_src_extra_arg = raw.get("bid_src_extra_arg")
+    global_max_query_runtime = raw.get("max_query_runtime")
     return [
         ExperimentSpec(
             name=e["name"],
@@ -135,7 +141,9 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
             query=e["query"],
             repetitions=int(e.get("repetitions", global_repetitions)),
             placement_method=e.get("placement_method", ""),
-            num_task_slots=e.get("num_task_slots"),
+            num_task_slots=e.get("num_task_slots", global_num_task_slots),
+            bid_src_extra_arg=e.get("bid_src_extra_arg", global_bid_src_extra_arg),
+            max_query_runtime=e.get("max_query_runtime", global_max_query_runtime),
             graphml_file=e.get("graphml_file", ""),
         )
         for e in raw.get("experiments", [])
@@ -960,6 +968,54 @@ async def _wait_flink_job_finished(
     )
 
 
+async def _wait_flink_job_terminal(
+    snk_conn: asyncssh.SSHClientConnection,
+    job_id: str,
+    timeout: float = DONE_TIMEOUT,
+) -> str:
+    """Wait for a specific Flink job to reach FINISHED."""
+    deadline = time.monotonic() + timeout
+    last_status: Optional[str] = None
+    saw_running = False
+
+    while time.monotonic() < deadline:
+        jobs = await _flink_list_jobs(snk_conn)
+        job = next(
+            (
+                j for j in jobs
+                if isinstance(j, dict) and str(j.get("id")) == job_id
+            ),
+            None,
+        )
+        if job is not None:
+            status = str(job.get("status", "UNKNOWN"))
+            if status != last_status:
+                print(f"  Flink job {job_id}: {status}")
+                last_status = status
+
+            if status == "RUNNING":
+                saw_running = True
+
+            if status in {"RESTARTING", "FAILING", "FAILED", "CANCELLING", "CANCELED", "SUSPENDED"}:
+                raise FlinkJobRetryableError(
+                    f"Flink job {job_id} entered terminal/error state {status!r}."
+                )
+
+            if status == "FINISHED":
+                if not saw_running:
+                    print(
+                        "  Flink job reached FINISHED before RUNNING was observed "
+                        f"(job_id={job_id})."
+                    )
+                return job_id
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink job {job_id} to reach FINISHED"
+    )
+
+
 async def _wait_flink_job_running(
     snk_conn: asyncssh.SSHClientConnection,
     existing_job_ids: set[str],
@@ -1668,6 +1724,11 @@ async def _run_flink_repetition(
         for j in await _flink_list_jobs(snk_conn)
         if isinstance(j, dict) and j.get("id")
     }
+    max_runtime_s = (
+        exp.max_query_runtime / 1000.0
+        if exp.max_query_runtime is not None
+        else None
+    )
 
     sql_lib_mounts = " ".join(
         f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
@@ -1697,12 +1758,48 @@ async def _run_flink_repetition(
     ])))
 
     # ── Wait for completion ────────────────────────────────────────────────
+    job_id = await _wait_flink_job_running(snk_conn, existing_job_ids)
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
-    await asyncio.gather(
-        _wait_sink_done(snk_conn, sink_name, since=rep_start),
-        _wait_flink_job_finished(snk_conn, existing_job_ids),
-    )
-    print(f"  Repetition {rep} complete.")
+    sink_task = asyncio.create_task(_wait_sink_done(snk_conn, sink_name, since=rep_start))
+    job_task = asyncio.create_task(_wait_flink_job_terminal(snk_conn, job_id))
+
+    try:
+        if max_runtime_s is None:
+            await asyncio.gather(sink_task, job_task)
+            print(f"  Repetition {rep} complete.")
+            return
+
+        done, pending = await asyncio.wait(
+            {sink_task, job_task},
+            timeout=max_runtime_s,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        if not pending:
+            print(f"  Repetition {rep} complete.")
+            return
+
+        print(
+            f"  Max query runtime reached after {exp.max_query_runtime} ms; "
+            f"cancelling Flink job {job_id} via REST..."
+        )
+        await _cancel_flink_job(snk_conn, job_id)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            await _wait_sink_done(snk_conn, sink_name, since=rep_start, timeout=30)
+        except TimeoutError:
+            print(
+                f"  Sink did not emit '{DONE_SIGNAL}' within 30s after cancellation; "
+                "continuing with experiment teardown."
+            )
+        print(f"  Repetition {rep} reached max runtime and was canceled.")
+    finally:
+        if not sink_task.done():
+            sink_task.cancel()
+        if not job_task.done():
+            job_task.cancel()
+        await asyncio.gather(sink_task, job_task, return_exceptions=True)
 
 
 async def _run_flink_experiment(
@@ -1726,8 +1823,16 @@ async def _run_flink_experiment(
     skip_log_download_on_retryable_failure: bool = False,
 ) -> None:
     per_query  = qcfg.get(exp.query, {})
-    task_slots = exp.num_task_slots or per_query.get("num_task_slots", 1)
-    bid_extra  = per_query.get("bid_src_extra_arg", "")
+    task_slots = (
+        exp.num_task_slots
+        if exp.num_task_slots is not None
+        else per_query.get("num_task_slots", 1)
+    )
+    bid_extra = (
+        exp.bid_src_extra_arg
+        if exp.bid_src_extra_arg is not None
+        else per_query.get("bid_src_extra_arg", "")
+    )
     topology_name = Path(topology_file).stem
 
     # Load SQL
@@ -1909,6 +2014,9 @@ async def _run_flink_experiment(
             FLINK_IMAGE,
             "jobmanager",
         ])))
+        await _assert_running(snk_conn, jm_name)
+        print(f"  Waiting {FLINK_JOBMANAGER_START_DELAY}s before starting taskmanagers...")
+        await asyncio.sleep(FLINK_JOBMANAGER_START_DELAY)
 
         print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
         async def _start_taskmanager(wn: NodeInfo) -> None:
@@ -2028,8 +2136,16 @@ async def _run_flink_profile_query(
     latency: bool = False,
 ) -> None:
     per_query = qcfg.get(exp.query, {})
-    task_slots = exp.num_task_slots or per_query.get("num_task_slots", 1)
-    bid_extra = per_query.get("bid_src_extra_arg", "")
+    task_slots = (
+        exp.num_task_slots
+        if exp.num_task_slots is not None
+        else per_query.get("num_task_slots", 1)
+    )
+    bid_extra = (
+        exp.bid_src_extra_arg
+        if exp.bid_src_extra_arg is not None
+        else per_query.get("bid_src_extra_arg", "")
+    )
     topology_name = Path(topology_file).stem
     base_output_name = f"{exp.query}_{topology_name}"
     profile_placement_method = ""
@@ -2193,6 +2309,8 @@ async def _run_flink_profile_query(
             "jobmanager",
         ])))
         await _assert_running(snk_conn, jm_name)
+        print(f"  Waiting {FLINK_JOBMANAGER_START_DELAY}s before starting taskmanagers...")
+        await asyncio.sleep(FLINK_JOBMANAGER_START_DELAY)
 
         print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
 

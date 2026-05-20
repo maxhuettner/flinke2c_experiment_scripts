@@ -1,0 +1,217 @@
+{
+  "nodes": [
+    {
+      "id": "src",
+      "address": "10.10.0.10",
+      "on-prem-id": "zs06",
+      "location": "on-prem",
+      "node_type": "source"
+    },
+    {
+      "id": "N1",
+      "address": "10.20.0.10",
+      "cloud_instance_type": "t4g.small",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+    {
+      "id": "N2",
+      "address": "10.10.0.12",
+      "node_type": "compute",
+      "on-prem-id": "zs02",
+      "location": "on-prem",
+      "speed": "60"
+    },
+    {
+      "id": "N3",
+      "address": "10.10.0.13",
+      "node_type": "compute",
+      "on-prem-id": "zs03",
+      "location": "on-prem",
+      "speed": "55"
+    },
+    {
+      "id": "N4",
+      "address": "10.10.0.14",
+      "node_type": "compute",
+      "on-prem-id": "zs04",
+      "location": "on-prem",
+      "speed": "50"
+    },
+    {
+      "id": "N5",
+      "address": "10.10.0.15",
+      "node_type": "compute",
+      "on-prem-id": "zs05",
+      "location": "on-prem",
+      "speed": "40"
+    },
+
+    {
+      "id": "N6",
+      "address": "10.20.0.11",
+      "cloud_instance_type": "t4g.medium",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+    {
+      "id": "N7",
+      "address": "10.20.0.12",
+      "cloud_instance_type": "t4g.medium",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+    {
+      "id": "N8",
+      "address": "10.20.0.13",
+      "cloud_instance_type": "c6g.medium",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+    {
+      "id": "N9",
+      "address": "10.20.0.14",
+      "cloud_instance_type": "c6g.medium",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+    {
+      "id": "N10",
+      "address": "10.20.0.15",
+      "cloud_instance_type": "c6g.medium",
+      "node_type": "compute",
+      "location": "eu-west-3"
+    },
+
+    {
+      "id": "N11",
+      "address": "10.30.0.11",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "compute",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    },
+    {
+      "id": "N12",
+      "address": "10.30.0.12",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "compute",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    },
+    {
+      "id": "N13",
+      "address": "10.30.0.13",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "compute",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    },
+    {
+      "id": "N14",
+      "address": "10.30.0.14",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "compute",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    },
+    {
+      "id": "N15",
+      "address": "10.30.0.15",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "compute",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    },
+
+    {
+      "id": "snk",
+      "address": "10.30.0.10",
+      "cloud_instance_type": "c6g.large",
+      "node_type": "sink",
+      "location": "us-east-1",
+      "network_type": "all-to-all"
+    }
+  ],
+  "edges": [
+    {
+      "source": "src",
+      "target": "N5"
+    },
+
+    {
+      "source": "N5",
+      "target": "N4",
+      "speed": "600"
+    },
+    {
+      "source": "N5",
+      "target": "N3",
+      "speed": "600"
+    },
+    {
+      "source": "N4",
+      "target": "N2",
+      "speed": "1000"
+    },
+    {
+      "source": "N3",
+      "target": "N2",
+      "speed": "1000"
+    },
+    {
+      "source": "N3",
+      "target": "N1",
+      "speed": "500"
+    },
+
+    {
+      "source": "N1",
+      "target": "N6",
+      "speed": "500"
+    },
+    {
+      "source": "N2",
+      "target": "N7"
+    },
+
+    {
+      "source": "N6",
+      "target": "N8",
+      "speed": "600"
+    },
+    {
+      "source": "N7",
+      "target": "N8",
+      "speed": "600"
+    },
+    {
+      "source": "N8",
+      "target": "N9",
+      "speed": "1000"
+    },
+    {
+      "source": "N8",
+      "target": "N10",
+      "speed": "1000"
+    },
+    {
+      "source": "N9",
+      "target": "N10",
+      "speed": "1000"
+    },
+
+    {
+      "source": "N8",
+      "target": "N11"
+    },
+    {
+      "source": "N9",
+      "target": "N12"
+    },
+    {
+      "source": "N10",
+      "target": "N13"
+    }
+  ]
+}

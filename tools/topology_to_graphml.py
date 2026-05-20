@@ -42,7 +42,7 @@ def _load_topology(path: Path) -> dict:
 
 
 def _all_to_all_edges(raw_nodes: list[dict]) -> list[tuple[str, str]]:
-    """Generate directed all-to-all edges for a topology with no explicit edges.
+    """Generate directed all-to-all edges for a node group.
 
     Edges go from every non-sink node to every non-source node, covering
     the full mesh while avoiding sink → source back-edges.
@@ -54,19 +54,41 @@ def _all_to_all_edges(raw_nodes: list[dict]) -> list[tuple[str, str]]:
     return [(u, v) for u in non_sink for v in non_src if u != v]
 
 
+def _location_key(node: dict) -> str:
+    return str(node.get("location", "cloud")).strip().lower().replace("_", "-")
+
+
+def _implicit_group_mesh_edges(raw_nodes: list[dict]) -> list[tuple[str, str]]:
+    """Generate directed mesh edges for per-location all-to-all cloud groups."""
+    groups: dict[str, list[dict]] = {}
+    for node in raw_nodes:
+        network_type = str(node.get("network_type", "")).strip().lower()
+        location = _location_key(node)
+        if network_type != "all-to-all" or location in ("onprem", "on-prem"):
+            continue
+        groups.setdefault(location, []).append(node)
+
+    edges: list[tuple[str, str]] = []
+    for nodes in groups.values():
+        edges.extend(_all_to_all_edges(nodes))
+    return edges
+
+
 def topology_to_graphml(topo: dict, slots: int) -> str:
     """Convert a parsed topology dict to GraphML XML string."""
     raw_nodes = topo["nodes"]
     raw_edges = topo.get("edges", [])
 
-    # Identify source node (needed only to detect the no-edges case)
+    # Identify source node (needed only to detect the empty-topology case)
     has_source = any(nd.get("node_type", "compute").lower() == "source" for nd in raw_nodes)
 
     raw_edge_pairs = [(e["source"], e["target"]) for e in raw_edges]
+    implicit_edges = _implicit_group_mesh_edges(raw_nodes)
 
-    if raw_edge_pairs:
-        # Edges are already correctly directed in the topology JSON — use as-is
-        directed_edges = raw_edge_pairs
+    if raw_edge_pairs or implicit_edges:
+        # Explicit topology edges stay as defined. all-to-all groups contribute
+        # additional directed mesh edges for that cloud region.
+        directed_edges = list(dict.fromkeys([*raw_edge_pairs, *implicit_edges]))
     elif has_source:
         # No edges defined (e.g. pure-cloud flat topology): fully connected mesh
         directed_edges = _all_to_all_edges(raw_nodes)

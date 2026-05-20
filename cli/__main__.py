@@ -33,14 +33,22 @@ import yaml
 from dotenv import load_dotenv
 
 from cli.inventory import write_inventory
-from cli.terraform import build_tfvars, write_tfvars
+from cli.terraform import build_tfvars_by_region, write_tfvars
 from cli.topology import load_topology
 
 # ---------------------------------------------------------------------------
 # Fixed paths (relative to repo root — run the CLI from the repo root)
 # ---------------------------------------------------------------------------
 TERRAFORM_DIR = Path("resource_management/terraform")
-TERRAFORM_TFVARS = TERRAFORM_DIR / "generated.auto.tfvars.json"
+TERRAFORM_REGION_ROOT = TERRAFORM_DIR / ".regions"
+TERRAFORM_TFVARS_NAME = "generated.auto.tfvars.json"
+TERRAFORM_MODULE_FILES = (
+    "main.tf",
+    "outputs.tf",
+    "provider.tf",
+    "variables.tf",
+    "versions.tf",
+)
 ANSIBLE_DIR = Path("exp_management/ansible")
 ANSIBLE_INVENTORY = ANSIBLE_DIR / "inventory/generated_hosts.yml"
 ANSIBLE_ONPREM = ANSIBLE_DIR / "inventory/onprem.yml"
@@ -96,13 +104,52 @@ def _run(cmd: list[str], cwd: Optional[Path] = None) -> None:
         sys.exit(result.returncode)
 
 
-def _terraform(*args: str) -> None:
-    _run(["terraform", *args])
+def _terraform_workdir(region: str) -> Path:
+    safe_region = region.replace("/", "_")
+    return TERRAFORM_REGION_ROOT / safe_region
 
 
-def _fetch_terraform_outputs() -> dict:
+def _ensure_terraform_workdir(region: str) -> Path:
+    workdir = _terraform_workdir(region)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    for filename in TERRAFORM_MODULE_FILES:
+        source = TERRAFORM_DIR / filename
+        target = workdir / filename
+        contents = source.read_text()
+        if not target.exists() or target.read_text() != contents:
+            target.write_text(contents)
+
+    return workdir
+
+
+def _region_tfvars_path(region: str) -> Path:
+    return _terraform_workdir(region) / TERRAFORM_TFVARS_NAME
+
+
+def _has_terraform_state(workdir: Path) -> bool:
+    return any(
+        (workdir / filename).exists()
+        for filename in ("terraform.tfstate", "terraform.tfstate.backup")
+    )
+
+
+def _existing_terraform_workdir(region: str, region_count: int) -> Path:
+    regional = _terraform_workdir(region)
+    if _has_terraform_state(regional):
+        return regional
+    if region_count == 1 and _has_terraform_state(TERRAFORM_DIR):
+        return TERRAFORM_DIR
+    return regional
+
+
+def _terraform(workdir: Path, *args: str) -> None:
+    _run(["terraform", f"-chdir={workdir}", *args])
+
+
+def _fetch_terraform_outputs(workdir: Path) -> dict:
     result = subprocess.run(
-        ["terraform", f"-chdir={TERRAFORM_DIR}", "output", "-json"],
+        ["terraform", f"-chdir={workdir}", "output", "-json"],
         capture_output=True,
         text=True,
     )
@@ -112,22 +159,47 @@ def _fetch_terraform_outputs() -> dict:
     return json.loads(result.stdout)
 
 
-def _prepare_tfvars(topology_file: str) -> None:
-    """Write generated.auto.tfvars.json from the topology file."""
+def _prepare_tfvars_by_region(topology_file: str) -> dict[str, dict]:
+    """Write per-region Terraform variable files from the topology file."""
     graph = load_topology(topology_file)
     ssh_public_key = _load_ssh_public_key()
-    aws_region = os.environ.get("AWS_REGION", "eu-central-1")
+    default_region = os.environ.get("AWS_REGION", "eu-central-1")
     try:
-        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
+        tfvars_by_region = build_tfvars_by_region(
+            graph,
+            ssh_public_key=ssh_public_key,
+            aws_region=default_region,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    write_tfvars(TERRAFORM_TFVARS, tfvars)
-    print(f"  wrote {TERRAFORM_TFVARS}")
+
+    for region, tfvars in tfvars_by_region.items():
+        _ensure_terraform_workdir(region)
+        path = _region_tfvars_path(region)
+        write_tfvars(path, tfvars)
+        print(f"  wrote {path}")
+
+    return tfvars_by_region
 
 
-def _has_cloud_instances(tfvars: dict) -> bool:
-    """Return True when the generated tfvars contain EC2 instances to provision."""
-    return bool((tfvars or {}).get("ec2_instances"))
+def _has_cloud_instances(tfvars_by_region: dict[str, dict]) -> bool:
+    """Return True when any region has EC2 instances to provision."""
+    return any((tfvars or {}).get("ec2_instances") for tfvars in tfvars_by_region.values())
+
+
+def _fetch_all_terraform_outputs(regions: list[str]) -> dict[str, dict]:
+    instance_map: dict[str, dict] = {}
+    region_count = len(regions)
+    for region in regions:
+        workdir = _existing_terraform_workdir(region, region_count)
+        outputs = _fetch_terraform_outputs(workdir)
+        for node_id, meta in outputs.get("instances", {}).get("value", {}).items():
+            if node_id in instance_map:
+                raise click.ClickException(
+                    f"duplicate Terraform output for node {node_id!r} across regions"
+                )
+            instance_map[node_id] = meta
+    return instance_map
 
 
 def _write_prometheus_config(graph) -> None:
@@ -174,30 +246,26 @@ def main() -> None:
 def setup(topology_file: str) -> None:
     """Provision cloud infrastructure and configure all nodes."""
     graph = load_topology(topology_file)
-    ssh_public_key = _load_ssh_public_key()
-    aws_region = os.environ.get("AWS_REGION", "eu-central-1")
+    default_region = os.environ.get("AWS_REGION", "eu-central-1")
 
     # 1. Generate and write Terraform variables.
-    try:
-        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    write_tfvars(TERRAFORM_TFVARS, tfvars)
-    print(f"  wrote {TERRAFORM_TFVARS}")
+    tfvars_by_region = _prepare_tfvars_by_region(topology_file)
 
     # 2. Provision EC2 instances when the topology includes cloud nodes.
     instance_map: dict = {}
-    if _has_cloud_instances(tfvars):
-        _terraform(f"-chdir={TERRAFORM_DIR}", "init")
-        _terraform(
-            f"-chdir={TERRAFORM_DIR}",
-            "apply", "-auto-approve",
-            f"-var-file={TERRAFORM_TFVARS.name}",
-        )
+    if _has_cloud_instances(tfvars_by_region):
+        for region in sorted(tfvars_by_region):
+            workdir = _ensure_terraform_workdir(region)
+            _terraform(workdir, "init")
+            _terraform(
+                workdir,
+                "apply",
+                "-auto-approve",
+                f"-var-file={TERRAFORM_TFVARS_NAME}",
+            )
 
         # 3. Fetch instance IPs from Terraform outputs.
-        outputs = _fetch_terraform_outputs()
-        instance_map = outputs.get("instances", {}).get("value", {})
+        instance_map = _fetch_all_terraform_outputs(sorted(tfvars_by_region))
     else:
         print("  no cloud nodes to provision; skipping Terraform apply")
 
@@ -216,12 +284,18 @@ def setup(topology_file: str) -> None:
         ansible_key=ansible_key,
         output_path=ANSIBLE_INVENTORY,
         onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
+        default_cloud_region=default_region,
     )
     print(f"  wrote {ANSIBLE_INVENTORY}")
     _write_prometheus_config(graph)
 
     # 5. Run Ansible to install packages, enable IP forwarding, and configure WireGuard.
     _run(["ansible-playbook", "playbooks/site.yml"], cwd=ANSIBLE_DIR)
+
+    # 6. Reboot only AWS/cloud nodes after setup so cloud-side networking and
+    # kernel settings come up cleanly without touching on-prem hosts.
+    if instance_map:
+        _run(["ansible-playbook", "playbooks/reboot-cloud.yml"], cwd=ANSIBLE_DIR)
 
 
 @main.command("gen-inventory")
@@ -234,15 +308,18 @@ def gen_inventory(topology_file: str) -> None:
     (i.e. 'setup' must have been run at least once).
     """
     graph = load_topology(topology_file)
-    # On-prem-only topologies have no Terraform-managed instances.
+    default_region = os.environ.get("AWS_REGION", "eu-central-1")
     try:
-        tfvars = build_tfvars(graph, ssh_public_key=None, aws_region=os.environ.get("AWS_REGION", "eu-central-1"))
+        tfvars_by_region = build_tfvars_by_region(
+            graph,
+            ssh_public_key=None,
+            aws_region=default_region,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     instance_map: dict = {}
-    if _has_cloud_instances(tfvars):
-        outputs = _fetch_terraform_outputs()
-        instance_map = outputs.get("instances", {}).get("value", {})
+    if _has_cloud_instances(tfvars_by_region):
+        instance_map = _fetch_all_terraform_outputs(sorted(tfvars_by_region))
 
     ansible_user = (
         os.environ.get("ANSIBLE_CLOUD_SSH_USER")
@@ -258,6 +335,7 @@ def gen_inventory(topology_file: str) -> None:
         ansible_key=ansible_key,
         output_path=ANSIBLE_INVENTORY,
         onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
+        default_cloud_region=default_region,
     )
     print(f"  wrote {ANSIBLE_INVENTORY}")
     _write_prometheus_config(graph)
@@ -268,21 +346,13 @@ def gen_inventory(topology_file: str) -> None:
 def destroy(topology_file: str) -> None:
     """Remove on-prem WireGuard state and tear down cloud infrastructure."""
     graph = load_topology(topology_file)
-    ssh_public_key = _load_ssh_public_key()
-    aws_region = os.environ.get("AWS_REGION", "eu-central-1")
-
-    try:
-        tfvars = build_tfvars(graph, ssh_public_key=ssh_public_key, aws_region=aws_region)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    write_tfvars(TERRAFORM_TFVARS, tfvars)
-    print(f"  wrote {TERRAFORM_TFVARS}")
+    default_region = os.environ.get("AWS_REGION", "eu-central-1")
+    tfvars_by_region = _prepare_tfvars_by_region(topology_file)
 
     instance_map: dict = {}
-    if _has_cloud_instances(tfvars):
+    if _has_cloud_instances(tfvars_by_region):
         try:
-            outputs = _fetch_terraform_outputs()
-            instance_map = outputs.get("instances", {}).get("value", {})
+            instance_map = _fetch_all_terraform_outputs(sorted(tfvars_by_region))
         except SystemExit:
             print("  warning: could not fetch Terraform outputs; continuing with on-prem cleanup only")
             instance_map = {}
@@ -301,21 +371,31 @@ def destroy(topology_file: str) -> None:
         ansible_key=ansible_key,
         output_path=ANSIBLE_INVENTORY,
         onprem_path=ANSIBLE_ONPREM if ANSIBLE_ONPREM.exists() else None,
+        default_cloud_region=default_region,
     )
     print(f"  wrote {ANSIBLE_INVENTORY}")
 
     _run(["ansible-playbook", "playbooks/wireguard-cleanup.yml"], cwd=ANSIBLE_DIR)
 
-    if not _has_cloud_instances(tfvars):
+    if not _has_cloud_instances(tfvars_by_region):
         print("  no cloud nodes in topology; skipping Terraform destroy")
         return
 
-    _terraform(f"-chdir={TERRAFORM_DIR}", "init")
-    _terraform(
-        f"-chdir={TERRAFORM_DIR}",
-        "destroy", "-auto-approve",
-        f"-var-file={TERRAFORM_TFVARS.name}",
-    )
+    region_count = len(tfvars_by_region)
+    for region in sorted(tfvars_by_region):
+        workdir = _existing_terraform_workdir(region, region_count)
+        if workdir == TERRAFORM_DIR:
+            write_tfvars(TERRAFORM_DIR / TERRAFORM_TFVARS_NAME, tfvars_by_region[region])
+            print(f"  wrote {TERRAFORM_DIR / TERRAFORM_TFVARS_NAME}")
+        else:
+            workdir = _ensure_terraform_workdir(region)
+        _terraform(workdir, "init")
+        _terraform(
+            workdir,
+            "destroy",
+            "-auto-approve",
+            f"-var-file={TERRAFORM_TFVARS_NAME}",
+        )
 
 
 @main.command("run")
