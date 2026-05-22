@@ -137,14 +137,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: cloud.graphml
 
-  # - name: nes_q1_cloud
-  #   system: nes
-  #   query: q1
+  - name: nes_q1_cloud
+    system: nes
+    query: q1
 
-  # - name: nes_q4_cloud
-  #   system: nes
-  #   query: q4
+  - name: nes_q4_cloud
+    system: nes
+    query: q4
 
-  # - name: nes_q5_cloud
-  #   system: nes
-  #   query: q5
+  - name: nes_q5_cloud
+    system: nes
+    query: q5
