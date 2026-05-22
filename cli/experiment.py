@@ -43,7 +43,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 import asyncssh
 import networkx as nx
@@ -1172,21 +1173,17 @@ async def _wait_nes_topology_workers_ready(
     nes_name: str,
     expected_count: int,
     timeout: float = NES_CLUSTER_READY_TIMEOUT,
-) -> None:
+) -> dict[str, Any]:
     """Wait until NES topology REST reports all worker nodes.
 
     expected_count includes the coordinator-local worker.
     """
     if expected_count <= 0:
-        return
+        return {}
 
     deadline = time.monotonic() + timeout
     last_seen = -1
-    topology_cmd = (
-        f"for p in /v1/nes/topology /nes/topology; do "
-        f"curl -fsS http://127.0.0.1:{NES_REST_PORT}$p && exit 0; "
-        "done; exit 1"
-    )
+    topology_cmd = _nes_topology_fetch_cmd()
 
     while time.monotonic() < deadline:
         # Fail fast if the coordinator crashed before workers registered.
@@ -1215,7 +1212,7 @@ async def _wait_nes_topology_workers_ready(
                 print(f"  NES topology nodes: {seen}/{expected_count}")
                 last_seen = seen
             if seen >= expected_count:
-                return
+                return payload if isinstance(payload, dict) else {}
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -1223,6 +1220,272 @@ async def _wait_nes_topology_workers_ready(
         f"Timed out after {timeout:.0f}s waiting for NES topology workers "
         f"({expected_count} expected, last seen {max(last_seen, 0)})."
     )
+
+
+def _nes_topology_fetch_cmd() -> str:
+    return (
+        f"for p in /v1/nes/topology /nes/topology; do "
+        f"curl -fsS http://127.0.0.1:{NES_REST_PORT}$p && exit 0; "
+        "done; exit 1"
+    )
+
+
+def _rewrite_nes_query_sink_host(query: str, sink_host: str) -> str:
+    """Replace the TcpSinkDescriptor host with the topology sink address."""
+    pattern = r'TcpSinkDescriptor::create\("([^"]+)"\s*,'
+    replacement = f'TcpSinkDescriptor::create("{sink_host}",'
+    rewritten, count = re.subn(pattern, replacement, query, count=1)
+    if count == 0:
+        raise RuntimeError(
+            "Failed to locate TcpSinkDescriptor in NES query for sink host rewrite."
+        )
+    return rewritten
+
+
+def _extract_nes_topology_nodes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def _walk_keyed_values(value: Any, *, key: str = "") -> list[tuple[str, Any]]:
+    found: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            found.extend(_walk_keyed_values(child_value, key=str(child_key)))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_walk_keyed_values(item, key=key))
+    else:
+        found.append((key, value))
+    return found
+
+
+def _parse_worker_id(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _extract_nes_worker_id(node: dict[str, Any]) -> Optional[int]:
+    preferred_keys = ("workerid", "id")
+
+    keyed_values = _walk_keyed_values(node)
+    for key_name in preferred_keys:
+        for key, value in keyed_values:
+            if key.lower() != key_name:
+                continue
+            worker_id = _parse_worker_id(value)
+            if worker_id is not None:
+                return worker_id
+    return None
+
+
+def _normalize_host_candidates(raw: str) -> set[str]:
+    candidates: set[str] = set()
+    value = raw.strip()
+    if not value:
+        return candidates
+
+    candidates.add(value)
+
+    parsed = urlparse(value)
+    if parsed.hostname:
+        candidates.add(parsed.hostname)
+
+    if "://" not in value and value.count(":") == 1:
+        host_part = value.split(":", 1)[0].strip()
+        if host_part:
+            candidates.add(host_part)
+
+    return candidates
+
+
+def _extract_nes_worker_addresses(node: dict[str, Any]) -> set[str]:
+    addresses: set[str] = set()
+    for key, value in _walk_keyed_values(node):
+        if not isinstance(value, str):
+            continue
+        key_name = key.lower()
+        if not any(token in key_name for token in ("host", "addr", "ip")):
+            continue
+        addresses.update(_normalize_host_candidates(value))
+    return addresses
+
+
+def _map_topology_workers_to_nes_ids(
+    payload: dict[str, Any],
+    worker_nodes: list[NodeInfo],
+) -> dict[str, int]:
+    address_to_topology_id: dict[str, str] = {}
+    for worker in worker_nodes:
+        for candidate in (worker.address, worker.host):
+            for normalized in _normalize_host_candidates(candidate):
+                existing = address_to_topology_id.get(normalized)
+                if existing and existing != worker.id:
+                    raise RuntimeError(
+                        "NES topology mapping is ambiguous: "
+                        f"address {normalized!r} matches both {existing!r} and {worker.id!r}."
+                    )
+                address_to_topology_id[normalized] = worker.id
+
+    mapping: dict[str, int] = {}
+    unresolved = {worker.id for worker in worker_nodes}
+    unmatched_nodes: list[dict[str, Any]] = []
+
+    for node in _extract_nes_topology_nodes(payload):
+        worker_id = _extract_nes_worker_id(node)
+        if worker_id is None:
+            unmatched_nodes.append(node)
+            continue
+
+        matched_topology_id: Optional[str] = None
+        for address in _extract_nes_worker_addresses(node):
+            topology_id = address_to_topology_id.get(address)
+            if topology_id is None:
+                continue
+            matched_topology_id = topology_id
+            break
+
+        if matched_topology_id is None:
+            unmatched_nodes.append(node)
+            continue
+
+        existing = mapping.get(matched_topology_id)
+        if existing is not None and existing != worker_id:
+            raise RuntimeError(
+                "NES topology mapping is inconsistent: "
+                f"topology node {matched_topology_id!r} matched worker IDs {existing} and {worker_id}."
+            )
+
+        mapping[matched_topology_id] = worker_id
+        unresolved.discard(matched_topology_id)
+
+    if unresolved:
+        available = [
+            {
+                "workerId": _extract_nes_worker_id(node),
+                "addresses": sorted(_extract_nes_worker_addresses(node)),
+            }
+            for node in _extract_nes_topology_nodes(payload)
+        ]
+        raise RuntimeError(
+            "Failed to map all topology workers to NES worker IDs. "
+            f"Unresolved topology nodes: {sorted(unresolved)}. "
+            f"REST topology nodes: {available}"
+        )
+
+    return mapping
+
+
+def _load_explicit_topology_edges(topology_file: str) -> list[tuple[str, str]]:
+    with open(topology_file) as f:
+        raw = _json.load(f)
+
+    edges = raw.get("edges", [])
+    if not isinstance(edges, list):
+        return []
+
+    explicit_edges: list[tuple[str, str]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("source")
+        target = edge.get("target")
+        if isinstance(source, str) and isinstance(target, str):
+            explicit_edges.append((source, target))
+    return explicit_edges
+
+
+def _desired_nes_topology_links(
+    topology_file: str,
+    worker_topology_ids: set[str],
+) -> list[tuple[str, str]]:
+    """Return NES parent->child links derived from source->sink topology edges."""
+    desired_links: list[tuple[str, str]] = []
+    seen_links: set[tuple[str, str]] = set()
+
+    for source_id, target_id in _load_explicit_topology_edges(topology_file):
+        if source_id not in worker_topology_ids or target_id not in worker_topology_ids:
+            continue
+
+        # Topology edges flow source->sink, while NES parent-child links point
+        # upstream toward the sink: A->B becomes parent=B, child=A.
+        link = (target_id, source_id)
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+        desired_links.append(link)
+
+    return desired_links
+
+
+async def _reconcile_nes_worker_topology(
+    *,
+    snk_conn: asyncssh.SSHClientConnection,
+    topology_file: str,
+    worker_nodes: list[NodeInfo],
+    rest_payload: dict[str, Any],
+) -> None:
+    desired_links = _desired_nes_topology_links(
+        topology_file,
+        {worker.id for worker in worker_nodes},
+    )
+    if not desired_links:
+        print("  NES topology has no explicit compute-to-compute links; keeping default parent assignments.")
+        return
+
+    topology_to_worker_id = _map_topology_workers_to_nes_ids(rest_payload, worker_nodes)
+    readable_mapping = ", ".join(
+        f"{topology_id}={worker_id}"
+        for topology_id, worker_id in sorted(topology_to_worker_id.items())
+    )
+    print(f"  NES worker ID mapping: {readable_mapping}")
+
+    explicit_children = {
+        topology_to_worker_id[child_topology_id]
+        for _, child_topology_id in desired_links
+    }
+    for child_id in sorted(explicit_children):
+        delete_payload = _json.dumps({"parentId": 1, "childId": child_id})
+        delete_cmd = (
+            f"curl -fsS -X DELETE http://127.0.0.1:{NES_REST_PORT}/v1/nes/topology/removeAsChild "
+            f"-H 'Content-Type: application/json' "
+            f"-d {shlex.quote(delete_payload)}"
+        )
+        delete_result = await snk_conn.run(delete_cmd, check=False)
+        if delete_result.exit_status != 0:
+            stderr = (delete_result.stderr or "").strip()
+            if "404" not in stderr:
+                raise RuntimeError(
+                    "Failed to remove default NES parent-child link "
+                    f"1->{child_id}: {stderr or delete_result.stdout or 'no output'}"
+                )
+
+    for parent_topology_id, child_topology_id in desired_links:
+        parent_id = topology_to_worker_id[parent_topology_id]
+        child_id = topology_to_worker_id[child_topology_id]
+        if parent_id == child_id:
+            raise RuntimeError(
+                f"Refusing to create self-link for NES worker {parent_topology_id!r} (workerId={parent_id})."
+            )
+
+        add_payload = _json.dumps({"parentId": parent_id, "childId": child_id})
+        add_cmd = (
+            f"curl -fsS -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/topology/addAsChild "
+            f"-H 'Content-Type: application/json' "
+            f"-d {shlex.quote(add_payload)}"
+        )
+        await _run(snk_conn, add_cmd)
+
+    print(f"  Reconciled {len(desired_links)} NES parent-child link(s) from topology.")
 
 
 # ── Config generators ─────────────────────────────────────────────────────────
@@ -1450,7 +1713,6 @@ logicalSources:
 def _nes_worker_config(
     worker_host: str,
     coordinator_host: str,
-    worker_id: int,
     source_host: Optional[str] = None,
 ) -> str:
     cfg = f"""\
@@ -1504,8 +1766,6 @@ physicalSources:
 
 """
     cfg += f"""\
-workerId: {worker_id}
-
 parentId: 1
 """
     return cfg
@@ -2528,6 +2788,7 @@ async def _run_nes_repetition(
 
 async def _run_nes_experiment(
     exp: ExperimentSpec,
+    topology_file: str,
     src: NodeInfo,
     src_conn: asyncssh.SSHClientConnection,
     src_home: str,
@@ -2544,19 +2805,20 @@ async def _run_nes_experiment(
     query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
         raise FileNotFoundError(f"NES query file not found: {query_path}")
-    query_str = query_path.read_text().strip()
+    query_str = _rewrite_nes_query_sink_host(
+        query_path.read_text().strip(),
+        snk.address,
+    )
 
     # Build configs
     coordinator_cfg = _nes_coordinator_config(snk.address)
     # Workers: first compute node gets physicalSources pointing to src
     worker_cfgs: dict[str, str] = {}
     for idx, wn in enumerate(worker_nodes):
-        worker_id   = idx + 2   # coordinator=1; workers start at 2
         source_host = src.address if idx == 0 else None
         worker_cfgs[wn.id] = _nes_worker_config(
             worker_host=wn.address,
             coordinator_host=snk.address,
-            worker_id=worker_id,
             source_host=source_host,
         )
 
@@ -2706,12 +2968,19 @@ async def _run_nes_experiment(
             "  Waiting for NES topology to report "
             f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
         )
-        await _wait_nes_topology_workers_ready(
+        rest_payload = await _wait_nes_topology_workers_ready(
             snk_conn=snk_conn,
             nes_name=nes_name,
             expected_count=expected_nes_nodes,
         )
         print("  NES cluster is ready.")
+        print("  Reconciling NES worker topology...")
+        await _reconcile_nes_worker_topology(
+            snk_conn=snk_conn,
+            topology_file=topology_file,
+            worker_nodes=worker_nodes,
+            rest_payload=rest_payload,
+        )
 
         for rep in range(1, exp.repetitions + 1):
             await _run_nes_repetition(
@@ -2853,6 +3122,7 @@ async def run_experiments(
             if exp.system == "nes":
                 await _run_nes_experiment(
                     exp=exp,
+                    topology_file=topology_file,
                     src=src,
                     src_conn=src_conn,
                     src_home=src_home,

@@ -83,15 +83,15 @@ experiments:
   #   placement_method: BOTTOM_UP
   #   graphml_file: wan.graphml
 
-  - name: flink_q7_wan
-    system: flink
-    query: q7
+  # - name: flink_q7_wan
+  #   system: flink
+  #   query: q7
 
-  - name: flinke2c_td_q7_wan
-    system: flink
-    query: q7
-    placement_method: TOP_DOWN
-    graphml_file: wan.graphml
+  # - name: flinke2c_td_q7_wan
+  #   system: flink
+  #   query: q7
+  #   placement_method: TOP_DOWN
+  #   graphml_file: wan.graphml
 
   # - name: flinke2c_bu_q7_wan
   #   system: flink
@@ -99,9 +99,9 @@ experiments:
   #   placement_method: BOTTOM_UP
   #   graphml_file: wan.graphml
 
-  - name: flink_q8_wan
-    system: flink
-    query: q8
+  # - name: flink_q8_wan
+  #   system: flink
+  #   query: q8
 
   # - name: flinke2c_td_q8_wan
   #   system: flink
@@ -114,3 +114,15 @@ experiments:
   #   query: q8
   #   placement_method: BOTTOM_UP
   #   graphml_file: wan.graphml
+  
+  - name: nes_q1_wan
+    system: nes
+    query: q1
+
+  - name: nes_q4_wan
+    system: nes
+    query: q4
+
+  - name: nes_q5_wan
+    system: nes
+    query: q5

@@ -138,7 +138,6 @@
       "source": "src",
       "target": "N5"
     },
-
     {
       "source": "N5",
       "target": "N4",
@@ -164,7 +163,6 @@
       "target": "N1",
       "speed": "500"
     },
-
     {
       "source": "N1",
       "target": "N6",
@@ -174,7 +172,6 @@
       "source": "N2",
       "target": "N7"
     },
-
     {
       "source": "N6",
       "target": "N8",
@@ -200,7 +197,6 @@
       "target": "N10",
       "speed": "1000"
     },
-
     {
       "source": "N8",
       "target": "N11"
