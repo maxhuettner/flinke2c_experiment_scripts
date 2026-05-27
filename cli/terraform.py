@@ -84,10 +84,7 @@ def _cloud_transit_nodes(graph: nx.Graph) -> set[str]:
 
     for index, src in enumerate(node_ids):
         for dst in node_ids[index + 1:]:
-            try:
-                paths = nx.all_shortest_paths(graph, src, dst)
-            except nx.NetworkXNoPath:
-                continue
+            paths = nx.all_shortest_paths(graph, src, dst)
 
             for path in paths:
                 for node_id in path[1:-1]:

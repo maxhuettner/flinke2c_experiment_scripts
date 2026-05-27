@@ -8,6 +8,7 @@ from cli.topology import load_topology
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WAN_TOPOLOGY = REPO_ROOT / "config" / "topologies" / "wan.json"
+CLOUD_TOPOLOGY = REPO_ROOT / "config" / "topologies" / "cloud.json"
 
 
 class TerraformInventoryRegionTests(unittest.TestCase):
@@ -48,6 +49,19 @@ class TerraformInventoryRegionTests(unittest.TestCase):
         )
 
         self.assertTrue(any("10.20.0.13/32" in cmd for cmd in route_cmds))
+
+    def test_tfvars_allow_all_to_all_cloud_topology(self) -> None:
+        graph = load_topology(str(CLOUD_TOPOLOGY))
+
+        tfvars_by_region = build_tfvars_by_region(graph, aws_region="eu-central-1")
+
+        self.assertEqual(set(tfvars_by_region), {"eu-central-1"})
+        self.assertEqual(
+            set(tfvars_by_region["eu-central-1"]["ec2_instances"]),
+            {"snk", "N1", "N2", "N3", "N4", "N5", "src"},
+        )
+        for instance in tfvars_by_region["eu-central-1"]["ec2_instances"].values():
+            self.assertNotIn("source_dest_check", instance)
 
 
 if __name__ == "__main__":

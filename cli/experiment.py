@@ -26,7 +26,7 @@ Usage:
         [-o results/] \\
         [--skip-data-upload] \\
         [--start-with-rep N] \\
-        [--latency]
+        [--no-latency]
 """
 
 from __future__ import annotations
@@ -2116,7 +2116,7 @@ async def _run_flink_experiment(
     output_dir: Path,
     attempt: int = 1,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
     skip_log_download_on_retryable_failure: bool = False,
 ) -> None:
     per_query  = qcfg.get(exp.query, {})
@@ -2438,7 +2438,7 @@ async def _run_flink_profile_query(
     lib_jars: list[Path],
     qcfg: dict,
     capsys_python: str,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     per_query = qcfg.get(exp.query, {})
     task_slots = (
@@ -2800,7 +2800,7 @@ async def _run_nes_experiment(
     worker_homes: dict[str, str],
     output_dir: Path,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
@@ -3038,7 +3038,7 @@ async def run_experiments(
     passphrase: Optional[str] = None,
     skip_data_upload: bool = False,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     graph = load_topology(topology_file)
     nodes = load_nodes(topology_file)
@@ -3198,7 +3198,7 @@ async def run_profiles(
     key_path: str,
     passphrase: Optional[str] = None,
     skip_data_upload: bool = False,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     graph = load_topology(topology_file)
     nodes = load_nodes(topology_file)

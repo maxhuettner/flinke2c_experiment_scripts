@@ -511,8 +511,9 @@ def run_cmd(topology_file: str, command: str, nodes: tuple[str, ...]) -> None:
     help="Optional repetition number forwarded to source/sink containers",
 )
 @click.option(
-    "--latency",
-    is_flag=True,
+    "--latency/--no-latency",
+    default=True,
+    show_default=True,
     help="Forward --latency to source/sink containers",
 )
 def experiment_cmd(
@@ -581,8 +582,9 @@ def experiment_cmd(
     help="Skip uploading source data files (already present on remote node)",
 )
 @click.option(
-    "--latency",
-    is_flag=True,
+    "--latency/--no-latency",
+    default=True,
+    show_default=True,
     help="Forward --latency to source/sink containers",
 )
 def profile_cmd(
