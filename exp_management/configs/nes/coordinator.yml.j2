@@ -31,12 +31,16 @@ logicalSources:
         type: FLOAT64
       - name: dateTime
         type: INT64
+      - name: latency_ts
+        type: INT64
 
   - logicalSourceName: persons
     fields:
       - name: id
         type: INT64
       - name: dateTime
+        type: INT64
+      - name: latency_ts
         type: INT64
 
   - logicalSourceName: auctions
@@ -54,4 +58,6 @@ logicalSources:
       - name: seller
         type: INT64
       - name: category
+        type: INT64
+      - name: latency_ts
         type: INT64

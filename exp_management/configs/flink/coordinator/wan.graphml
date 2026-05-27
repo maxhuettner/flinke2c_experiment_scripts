@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+    <key id="type"    for="node" attr.name="type"              attr.type="string"/>
+    <key id="id"      for="node" attr.name="id"                attr.type="string"/>
+    <key id="compute" for="node" attr.name="computeCapability" attr.type="double"/>
+    <key id="memory"  for="node" attr.name="memoryCapability"  attr.type="double"/>
+    <key id="slots"   for="node" attr.name="slots"             attr.type="int"/>
+
+    <graph id="processing-topology" edgedefault="directed">
+        <node id="src">
+            <data key="type">source</data>
+            <data key="id">Source1</data>
+        </node>
+
+        <node id="N1">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.10</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N2">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.12</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N3">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.13</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N4">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.14</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N5">
+            <data key="type">compute</data>
+            <data key="id">10.10.0.15</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N6">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.11</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N7">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.12</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N8">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.13</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N9">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.14</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N10">
+            <data key="type">compute</data>
+            <data key="id">10.20.0.15</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N11">
+            <data key="type">compute</data>
+            <data key="id">10.30.0.11</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N12">
+            <data key="type">compute</data>
+            <data key="id">10.30.0.12</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N13">
+            <data key="type">compute</data>
+            <data key="id">10.30.0.13</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N14">
+            <data key="type">compute</data>
+            <data key="id">10.30.0.14</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="N15">
+            <data key="type">compute</data>
+            <data key="id">10.30.0.15</data>
+            <data key="compute">1.0</data>
+            <data key="memory">1.0</data>
+            <data key="slots">1</data>
+        </node>
+
+        <node id="snk">
+            <data key="type">sink</data>
+            <data key="id">Sink1</data>
+        </node>
+
+        <edge id="src_N5" source="src" target="N5"/>
+        <edge id="N5_N4" source="N5" target="N4"/>
+        <edge id="N5_N3" source="N5" target="N3"/>
+        <edge id="N4_N2" source="N4" target="N2"/>
+        <edge id="N3_N2" source="N3" target="N2"/>
+        <edge id="N3_N1" source="N3" target="N1"/>
+        <edge id="N1_N6" source="N1" target="N6"/>
+        <edge id="N2_N7" source="N2" target="N7"/>
+        <edge id="N6_N8" source="N6" target="N8"/>
+        <edge id="N7_N8" source="N7" target="N8"/>
+        <edge id="N8_N9" source="N8" target="N9"/>
+        <edge id="N8_N10" source="N8" target="N10"/>
+        <edge id="N9_N10" source="N9" target="N10"/>
+        <edge id="N8_N11" source="N8" target="N11"/>
+        <edge id="N9_N12" source="N9" target="N12"/>
+        <edge id="N10_N13" source="N10" target="N13"/>
+        <edge id="N11_N12" source="N11" target="N12"/>
+        <edge id="N11_N13" source="N11" target="N13"/>
+        <edge id="N11_N14" source="N11" target="N14"/>
+        <edge id="N11_N15" source="N11" target="N15"/>
+        <edge id="N11_snk" source="N11" target="snk"/>
+        <edge id="N12_N11" source="N12" target="N11"/>
+        <edge id="N12_N13" source="N12" target="N13"/>
+        <edge id="N12_N14" source="N12" target="N14"/>
+        <edge id="N12_N15" source="N12" target="N15"/>
+        <edge id="N12_snk" source="N12" target="snk"/>
+        <edge id="N13_N11" source="N13" target="N11"/>
+        <edge id="N13_N12" source="N13" target="N12"/>
+        <edge id="N13_N14" source="N13" target="N14"/>
+        <edge id="N13_N15" source="N13" target="N15"/>
+        <edge id="N13_snk" source="N13" target="snk"/>
+        <edge id="N14_N11" source="N14" target="N11"/>
+        <edge id="N14_N12" source="N14" target="N12"/>
+        <edge id="N14_N13" source="N14" target="N13"/>
+        <edge id="N14_N15" source="N14" target="N15"/>
+        <edge id="N14_snk" source="N14" target="snk"/>
+        <edge id="N15_N11" source="N15" target="N11"/>
+        <edge id="N15_N12" source="N15" target="N12"/>
+        <edge id="N15_N13" source="N15" target="N13"/>
+        <edge id="N15_N14" source="N15" target="N14"/>
+        <edge id="N15_snk" source="N15" target="snk"/>
+
+    </graph>
+</graphml>

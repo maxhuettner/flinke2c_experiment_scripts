@@ -1,0 +1,45 @@
+{
+  "jarpath": "",
+  "jarargs": {},
+  "expname": "nexmark_sql_local",
+  "kafkaip": "127.0.0.1",
+  "KAFKAROOT": "",
+  "iolimit": "NONE",
+  "tclimit": "unlimit",
+  "tcnic": "",
+  "user": "",
+  "jmip": "127.0.0.1",
+  "jmpt": 8081,
+  "prometheus_port": 9090,
+  "warmup_sec": 10,
+  "warmup_first_sec": 10,
+  "run_period_sec": 30,
+  "run_freq_sec": 5,
+  "FLINKROOT": "",
+  "TMPROOT": "",
+  "SAVEROOT": "",
+  "ctype": "docker",
+  "use_single_process_plan": true,
+  "resetsec": 60,
+  "jobid": "",
+  "iplist": ["172.30.0.11", "172.30.0.12", "172.30.0.13", "172.30.0.14"],
+  "workers_slot": 4,
+  "srcratelist": [
+    {"Source": 1000}
+  ],
+  "oprlist": [],
+  "mapping": {
+    "Source": "Source",
+    "Calc": "Calc",
+    "Join": "Join",
+    "Sink": "Sink"
+  },
+  "schedulercfg1st": [],
+  "dfs": {
+    "planNum": 1,
+    "step_ratio_compute": 0.01,
+    "step_ratio_io": 0.1,
+    "step_ratio_network": 0.1,
+    "randomOptimal": false
+  }
+}

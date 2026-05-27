@@ -25,6 +25,16 @@ class TopoNode:
         loc = (self.location or "").strip().lower().replace("_", "-")
         return loc in ("onprem", "on-prem")
 
+    def cloud_region(self, default_region: str) -> Optional[str]:
+        if self.is_on_prem():
+            return None
+
+        loc = (self.location or "").strip()
+        normalized = loc.lower().replace("_", "-")
+        if normalized in ("", "cloud", "aws", "ec2"):
+            return default_region
+        return loc
+
     def should_provision(self) -> bool:
         value = (self.provision or "").strip().lower()
         if value in ("existing", "static", "skip", "false", "onprem", "on-prem"):
@@ -69,4 +79,30 @@ def load_topology(path: str) -> nx.Graph:
             speed=ed.get("speed") or ed.get("weight", {}).get("speed"),
         )
 
+    _add_implicit_all_to_all_edges(g)
+
     return g
+
+
+def _add_implicit_all_to_all_edges(graph: nx.Graph) -> None:
+    """Expand same-location ``network_type=all-to-all`` groups into edges.
+
+    This keeps the JSON concise for flat cloud regions while still giving the
+    routing and provisioning code an explicit graph to work with.
+    """
+    groups: dict[str, list[str]] = {}
+
+    for node_id in graph.nodes():
+        node: TopoNode = graph.nodes[node_id]["data"]
+        network_type = str(node.extra.get("network_type", "")).strip().lower()
+        if network_type != "all-to-all" or node.is_on_prem():
+            continue
+
+        location_key = (node.location or "cloud").strip().lower().replace("_", "-")
+        groups.setdefault(location_key, []).append(node_id)
+
+    for node_ids in groups.values():
+        ordered = sorted(node_ids)
+        for index, source in enumerate(ordered):
+            for target in ordered[index + 1:]:
+                graph.add_edge(source, target)

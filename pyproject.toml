@@ -11,8 +11,11 @@ dependencies = [
     "bcrypt>=4.0",
     "cryptography>=42",
     "networkx>=3.2",
+    "numpy>=1.26",
+    "pandas>=2.2",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    "requests>=2.31",
     "click>=8.1",
 ]
 

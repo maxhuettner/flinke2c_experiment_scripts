@@ -31,6 +31,7 @@ docker_images_by_node_type:
     - maxhue/tcp-streaming
     - maxhue/nes-coordinator
     - maxhue/flinke2c
+    - prom/prometheus:latest
   compute:
     - maxhue/flinke2c
     - maxhue/nes-worker

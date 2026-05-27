@@ -39,20 +39,57 @@ def _is_on_prem_node(graph: nx.Graph, node_id: str) -> bool:
     return node.is_on_prem()
 
 
-def _build_wireguard_graph(graph: nx.Graph) -> nx.Graph:
-    """Return a graph that excludes cloud<->cloud edges.
+def _cloud_region(graph: nx.Graph, node_id: str, default_cloud_region: str) -> Optional[str]:
+    node = graph.nodes[node_id]["data"]
+    return node.cloud_region(default_cloud_region)
 
-    Cloud nodes communicate natively via VPC routing.  All other edges —
-    cloud<->on-prem and on-prem<->on-prem — get WireGuard tunnels so that
-    every node can reach every other node through the overlay and bandwidth
-    can be throttled on any link.
+
+def _uses_native_cloud_mesh(
+    graph: nx.Graph,
+    node_id: str,
+    default_cloud_region: str,
+) -> bool:
+    node = graph.nodes[node_id]["data"]
+    if node.is_on_prem():
+        return False
+    network_type = str(node.extra.get("network_type", "")).strip().lower()
+    if network_type != "all-to-all":
+        return False
+    return _cloud_region(graph, node_id, default_cloud_region) is not None
+
+
+def _is_native_cloud_edge(
+    graph: nx.Graph,
+    source: str,
+    target: str,
+    default_cloud_region: str,
+) -> bool:
+    if _is_on_prem_node(graph, source) or _is_on_prem_node(graph, target):
+        return False
+    if _cloud_region(graph, source, default_cloud_region) != _cloud_region(
+        graph, target, default_cloud_region
+    ):
+        return False
+    return _uses_native_cloud_mesh(graph, source, default_cloud_region) and _uses_native_cloud_mesh(
+        graph, target, default_cloud_region
+    )
+
+
+def _build_wireguard_graph(
+    graph: nx.Graph,
+    default_cloud_region: str,
+) -> nx.Graph:
+    """Return the graph edges that require WireGuard.
+
+    Same-region cloud nodes only bypass WireGuard when both endpoints are part
+    of an explicit ``network_type=all-to-all`` mesh. All other graph edges get
+    WireGuard tunnels so that the overlay matches the topology.
     """
     wg_graph: nx.Graph = nx.Graph()
     wg_graph.add_nodes_from(graph.nodes(data=True))
 
     for u, v, attrs in graph.edges(data=True):
-        # Skip cloud<->cloud edges: those use native VPC routing.
-        if not _is_on_prem_node(graph, u) and not _is_on_prem_node(graph, v):
+        if _is_native_cloud_edge(graph, u, v, default_cloud_region):
             continue
         wg_graph.add_edge(u, v, **attrs)
 
@@ -124,13 +161,15 @@ def _build_wg_configs(
     onprem_id_to_topo: dict[str, str],
     listen_port: int,
     salt: str,
+    default_cloud_region: str,
 ) -> dict:
     """Compute per-node WireGuard ECMP config for all nodes in the overlay.
 
-    Cloud<->cloud edges are excluded (VPC routing handles those).  All other
-    edges — cloud<->on-prem and on-prem<->on-prem — get WireGuard tunnels.
-    On-prem nodes use their topology ``address`` as the LAN endpoint; an
-    explicit ``ansible_host`` in onprem_hosts overrides that if set.
+    Same-region cloud<->cloud edges are excluded only when both endpoints use
+    ``network_type=all-to-all``. Cross-region cloud edges, explicit same-region
+    cloud edges, cloud<->on-prem edges, and on-prem<->on-prem edges get
+    WireGuard tunnels. On-prem nodes use their topology ``address`` as the LAN
+    endpoint; an explicit ``ansible_host`` in onprem_hosts overrides that if set.
     """
     # On-prem-only topology: no cloud nodes are present/provisioned, so skip
     # WireGuard entirely and use native cluster networking.
@@ -150,7 +189,7 @@ def _build_wg_configs(
                 "address for peer endpoints, which may be unreachable from other hosts"
             )
 
-    wg_graph = _build_wireguard_graph(graph)
+    wg_graph = _build_wireguard_graph(graph, default_cloud_region)
     wg_nodes = sorted(nid for nid, deg in wg_graph.degree() if deg > 0)
     wg_host_ips = {**cloud_host_ips, **onprem_host_ips}
 
@@ -194,6 +233,82 @@ def _build_wg_configs(
     )
 
 
+def _cloud_transit_route_commands(
+    graph: nx.Graph,
+    src: str,
+    default_cloud_region: str,
+) -> list[str]:
+    """Return static ECMP routes for a cloud node without direct WG interfaces."""
+    src_addr = graph.nodes[src]["data"].address
+    src_region = _cloud_region(graph, src, default_cloud_region)
+    cloud_neighbors = [
+        nbr for nbr in sorted(graph.neighbors(src))
+        if _is_native_cloud_edge(graph, src, nbr, default_cloud_region)
+    ]
+    if not cloud_neighbors:
+        return []
+
+    commands: list[str] = []
+    for dest in sorted(graph.nodes()):
+        if dest == src:
+            continue
+        if (
+            not _is_on_prem_node(graph, dest)
+            and _cloud_region(graph, dest, default_cloud_region) == src_region
+            and _uses_native_cloud_mesh(graph, dest, default_cloud_region)
+        ):
+            continue
+        try:
+            paths = list(nx.all_shortest_paths(graph, src, dest))
+        except nx.NetworkXNoPath:
+            continue
+
+        first_hops = sorted({
+            path[1]
+            for path in paths
+            if len(path) >= 2 and path[1] in cloud_neighbors
+        })
+        if not first_hops:
+            continue
+
+        dest_ip = graph.nodes[dest]["data"].address
+        nexthops = " ".join(
+            f"nexthop via {graph.nodes[hop]['data'].address}"
+            for hop in first_hops
+        )
+        commands.append(f"ip route replace {dest_ip}/32 src {src_addr} {nexthops}")
+
+    return commands
+
+
+def _augment_cloud_transit_routes(
+    graph: nx.Graph,
+    cloud_host_ips: dict[str, str],
+    wg_configs: dict,
+    default_cloud_region: str,
+) -> dict:
+    """Add route-only configs for cloud nodes that need transit to on-prem nodes."""
+    augmented = dict(wg_configs)
+    for node_id in sorted(cloud_host_ips):
+        existing = augmented.get(node_id)
+        if existing and existing.get("wireguard_interfaces"):
+            continue
+
+        route_cmds = _cloud_transit_route_commands(
+            graph,
+            node_id,
+            default_cloud_region,
+        )
+        if not route_cmds:
+            continue
+
+        augmented[node_id] = {
+            "wireguard_interfaces": [],
+            "wireguard_ecmp_routes": route_cmds,
+        }
+    return augmented
+
+
 def _build_cloud_entry(
     node_id: str,
     ip: str,
@@ -207,9 +322,12 @@ def _build_cloud_entry(
         entry["node_type"] = graph.nodes[node_id]["data"].node_type.lower()
     if ansible_key:
         entry["ansible_ssh_private_key_file"] = ansible_key
-    if node_id in wg_configs and wg_configs[node_id]["wireguard_interfaces"]:
-        entry["wireguard_interfaces"] = wg_configs[node_id]["wireguard_interfaces"]
-        entry["wireguard_ecmp_routes"] = wg_configs[node_id].get("wireguard_ecmp_routes", [])
+    if node_id in wg_configs:
+        interfaces = wg_configs[node_id].get("wireguard_interfaces", [])
+        routes = wg_configs[node_id].get("wireguard_ecmp_routes", [])
+        if interfaces or routes:
+            entry["wireguard_interfaces"] = interfaces
+            entry["wireguard_ecmp_routes"] = routes
     return entry
 
 
@@ -240,6 +358,7 @@ def write_inventory(
     onprem_path: Optional[Path] = None,
     wg_listen_port: int = DEFAULT_LISTEN_PORT,
     wg_salt: str = DEFAULT_KEY_SALT,
+    default_cloud_region: str = "eu-central-1",
 ) -> None:
     """Write the generated Ansible inventory to *output_path*.
 
@@ -250,8 +369,9 @@ def write_inventory(
     automatically.  *onprem_path* is optional and provides supplementary vars
     (ansible_user, …) that are merged in for matching hosts.
 
-    WireGuard ECMP configuration is generated only for cloud<->on-prem links.
-    Cloud<->cloud edges rely on native VPC routing and do not create WireGuard
+    Same-region cloud<->cloud edges rely on native VPC routing only for
+    ``network_type=all-to-all`` meshes. Explicit cloud edges outside that mesh,
+    cross-region cloud edges, and any edge touching on-prem create WireGuard
     interfaces.
     """
     onprem_file_vars = _load_onprem(onprem_path)
@@ -270,6 +390,13 @@ def write_inventory(
         onprem_id_to_topo=onprem_id_to_topo,
         listen_port=wg_listen_port,
         salt=wg_salt,
+        default_cloud_region=default_cloud_region,
+    )
+    wg_configs = _augment_cloud_transit_routes(
+        graph,
+        cloud_host_ips,
+        wg_configs,
+        default_cloud_region,
     )
 
     cloud_hosts: dict = {}

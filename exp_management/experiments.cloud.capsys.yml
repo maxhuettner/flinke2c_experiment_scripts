@@ -1,0 +1,64 @@
+# Example experiment batch definition for `sim experiment`.
+#
+# Usage:
+#   sim experiment \
+#     -f config/topologies/edge-to-cloud.json \
+#     -e exp_management/experiments.example.yml \
+#     -o results/
+#
+# Top-level fields:
+#   repetitions       - global default repetitions for all experiments (optional)
+#
+# Fields per experiment:
+#   name              - identifier; also used as the log output subdirectory
+#   system            - streaming system to use (currently only "flink")
+#   query             - query name, resolves to exp_management/queries/flink/<name>.sql
+#   repetitions       - per-experiment override (defaults to top-level repetitions or 1)
+#   placement_method  - "" (default) or e.g. "TOP_DOWN" (enables topology-aware placement)
+#   graphml_file      - graphml filename in exp_management/configs/flink/coordinator/
+#                       (optional; defaults to <topology-stem>.graphml when placement_method is set)
+#   num_task_slots    - override the task slot count from query_config.yml (optional)
+#
+# Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
+# exp_management/configs/flink/query_config.yml and can be overridden here.
+
+repetitions: 10
+
+experiments:
+  - name: capsys_q1_cloud
+    system: flink
+    placement_method: CAPSYS
+    query: q1
+
+  - name: capsys_q2_cloud
+    system: flink
+    placement_method: CAPSYS
+    query: q2
+
+  - name: capsys_q3_cloud
+    system: flink
+    placement_method: CAPSYS
+    query: q3
+
+  - name: capsys_q4_cloud
+    system: flink
+    placement_method: CAPSYS
+    query: q4
+
+  # Not supported by CAPSYS because of the multiple downstream operators
+  # - name: flink_q5_cloud
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q5
+
+  # Not supported by CAPSYS because of the multiple downstream operators
+  # - name: flink_q7_cloud
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q7
+
+  # Placement takes long
+  - name: capsys_q8_cloud
+    system: flink
+    placement_method: CAPSYS
+    query: q8

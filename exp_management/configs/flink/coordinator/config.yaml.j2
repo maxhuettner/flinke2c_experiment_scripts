@@ -30,6 +30,9 @@ io:
 cluster:
   placement-method: {{ flink_cluster_placement_method }}
 {% endif %}
+{% if (flink_cluster_placement_method | default('') | trim | upper) == 'CAPSYS' %}
+cluster.capsys.scheduler-cfg.path: /conf/schedulercfg
+{% endif %}
 
 pipeline.operator-chaining.enabled: false
 

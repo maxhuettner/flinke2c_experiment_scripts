@@ -26,22 +26,25 @@ Usage:
         [-o results/] \\
         [--skip-data-upload] \\
         [--start-with-rep N] \\
-        [--latency]
+        [--no-latency]
 """
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json as _json
 import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 import asyncssh
 import networkx as nx
@@ -59,12 +62,19 @@ SOURCE_DATA_DIR   = Path("exp_management/source_data")
 FLINK_LIB_DIR     = Path("lib")
 ANSIBLE_INVENTORY = Path("exp_management/ansible/inventory/generated_hosts.yml")
 SCRIPTS_DIR       = Path("scripts")
+CAPSYS_DIR        = Path("capsys")
 CSV_TO_PARQUET_SCRIPT = SCRIPTS_DIR / "convert_csv_to_parquet.py"
 DOWNSAMPLE_LATENCY_SCRIPT = SCRIPTS_DIR / "downsample_latency_parquet.py"
 REMOTE_LATENCY_PYTHON_PACKAGES = ("numpy", "polars")
+CAPSYS_GENERATOR_SCRIPT = CAPSYS_DIR / "generate_local_sql_config.py"
+CAPSYS_RUNDS_SCRIPT = CAPSYS_DIR / "runds2placement.py"
+CAPSYS_CONFIG_TEMPLATE = CAPSYS_DIR / "examples/runds2placement-local.example.json"
+CAPSYS_CONFIG_OUTPUT = CAPSYS_DIR / "expjson/local_sql.json"
+PROMETHEUS_CONFIG_FILE = Path("config/prometheus/prometheus.yml")
 
 FLINK_IMAGE = "maxhue/flinke2c:latest"
 TCP_IMAGE   = "maxhue/tcp-streaming"
+PROMETHEUS_IMAGE = "prom/prometheus:latest"
 
 NES_QUERIES_DIR       = Path("exp_management/queries/nes")
 NES_COORDINATOR_IMAGE = "maxhue/nes-coordinator"
@@ -79,10 +89,14 @@ POLL_INTERVAL  = 3     # seconds between docker-logs polls
 READY_TIMEOUT  = 120   # seconds to wait for source ready
 DONE_TIMEOUT   = 1800  # seconds to wait for experiment completion
 FLINK_CLUSTER_READY_TIMEOUT = 180  # seconds to wait for Flink TMs in REST
+FLINK_JOBMANAGER_START_DELAY = 5  # seconds to wait before starting taskmanagers
+SSH_CONNECT_RETRIES = 3
+SSH_CONNECT_RETRY_DELAY = 5
 FLINK_EXPERIMENT_MAX_RETRIES = int(os.getenv("SIM_FLINK_EXPERIMENT_MAX_RETRIES", "2"))
 TRACE_REMOTE_TIMINGS = (
     os.getenv("SIM_TRACE_REMOTE_TIMINGS", "").strip().lower() in ("1", "true", "yes")
 )
+CAPSYS_SOURCE_RATE = 5000
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -95,6 +109,8 @@ class ExperimentSpec:
     repetitions: int = 1
     placement_method: str = ""      # "" or e.g. "TOP_DOWN"
     num_task_slots: Optional[int] = None
+    bid_src_extra_arg: Optional[str] = None
+    max_query_runtime: Optional[int] = None  # milliseconds; cancel Flink job via REST when exceeded
     graphml_file: str = ""          # explicit graphml filename in coordinator dir, e.g. "cloud.graphml"
 
 
@@ -118,6 +134,9 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     global_repetitions = int(raw.get("repetitions", 1))
+    global_num_task_slots = raw.get("num_task_slots")
+    global_bid_src_extra_arg = raw.get("bid_src_extra_arg")
+    global_max_query_runtime = raw.get("max_query_runtime")
     return [
         ExperimentSpec(
             name=e["name"],
@@ -125,7 +144,9 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
             query=e["query"],
             repetitions=int(e.get("repetitions", global_repetitions)),
             placement_method=e.get("placement_method", ""),
-            num_task_slots=e.get("num_task_slots"),
+            num_task_slots=e.get("num_task_slots", global_num_task_slots),
+            bid_src_extra_arg=e.get("bid_src_extra_arg", global_bid_src_extra_arg),
+            max_query_runtime=e.get("max_query_runtime", global_max_query_runtime),
             graphml_file=e.get("graphml_file", ""),
         )
         for e in raw.get("experiments", [])
@@ -137,6 +158,30 @@ def load_query_config() -> dict:
         with open(QUERY_CONFIG_FILE) as f:
             return yaml.safe_load(f) or {}
     return {}
+
+
+def select_profile_experiments(experiments: list[ExperimentSpec]) -> list[ExperimentSpec]:
+    """Return one Flink experiment per query for CAPSys profiling."""
+    selected: dict[str, ExperimentSpec] = {}
+
+    for exp in experiments:
+        if exp.system.lower() != "flink":
+            continue
+
+        current = selected.get(exp.query)
+        if current is None:
+            selected[exp.query] = exp
+            continue
+
+        same_profile_shape = current.num_task_slots == exp.num_task_slots
+        if not same_profile_shape:
+            raise RuntimeError(
+                "CAPSys profile input is ambiguous for query "
+                f"{exp.query!r}: multiple Flink experiments define different "
+                "task-slot settings for the same query."
+            )
+
+    return list(selected.values())
 
 
 def load_nodes(topology_file: str) -> dict[str, NodeInfo]:
@@ -206,6 +251,36 @@ def _conn_kwargs(node: NodeInfo, key_path: str, passphrase: Optional[str]) -> di
     if passphrase:
         kw["passphrase"] = passphrase
     return kw
+
+
+async def _connect_node(
+    node: NodeInfo,
+    key_path: str,
+    passphrase: Optional[str],
+    *,
+    retries: int = SSH_CONNECT_RETRIES,
+    retry_delay: int = SSH_CONNECT_RETRY_DELAY,
+) -> asyncssh.SSHClientConnection:
+    """Connect to a node with retries and clear diagnostics."""
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            return await asyncssh.connect(**_conn_kwargs(node, key_path, passphrase))
+        except (asyncssh.Error, OSError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt == retries:
+                break
+            print(
+                f"  SSH connect failed for {node.id} ({node.host}) "
+                f"[attempt {attempt}/{retries}]: {exc}. Retrying in {retry_delay}s..."
+            )
+            await asyncio.sleep(retry_delay)
+
+    raise RuntimeError(
+        f"Failed to connect to node {node.id} ({node.host}) after {retries} attempts: "
+        f"{last_exc}"
+    )
 
 
 async def _run(conn: asyncssh.SSHClientConnection, cmd: str, *, check: bool = True) -> str:
@@ -533,6 +608,10 @@ async def _download_logs(
                 print(f"  downloaded {rel}")
             except asyncssh.SFTPError as exc:
                 print(f"  warning: could not download {rel}: {exc}", file=sys.stderr)
+
+
+def _retry_attempt_output_dir(output_dir: Path, attempt: int) -> Path:
+    return output_dir.parent / f"{output_dir.name}__retry_attempt_{attempt}"
 
 
 # ── Container helpers ─────────────────────────────────────────────────────────
@@ -926,26 +1005,185 @@ async def _wait_flink_job_finished(
     )
 
 
+async def _wait_flink_job_terminal(
+    snk_conn: asyncssh.SSHClientConnection,
+    job_id: str,
+    timeout: float = DONE_TIMEOUT,
+) -> str:
+    """Wait for a specific Flink job to reach FINISHED."""
+    deadline = time.monotonic() + timeout
+    last_status: Optional[str] = None
+    saw_running = False
+
+    while time.monotonic() < deadline:
+        jobs = await _flink_list_jobs(snk_conn)
+        job = next(
+            (
+                j for j in jobs
+                if isinstance(j, dict) and str(j.get("id")) == job_id
+            ),
+            None,
+        )
+        if job is not None:
+            status = str(job.get("status", "UNKNOWN"))
+            if status != last_status:
+                print(f"  Flink job {job_id}: {status}")
+                last_status = status
+
+            if status == "RUNNING":
+                saw_running = True
+
+            if status in {"RESTARTING", "FAILING", "FAILED", "CANCELLING", "CANCELED", "SUSPENDED"}:
+                raise FlinkJobRetryableError(
+                    f"Flink job {job_id} entered terminal/error state {status!r}."
+                )
+
+            if status == "FINISHED":
+                if not saw_running:
+                    print(
+                        "  Flink job reached FINISHED before RUNNING was observed "
+                        f"(job_id={job_id})."
+                    )
+                return job_id
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink job {job_id} to reach FINISHED"
+    )
+
+
+async def _wait_flink_job_running(
+    snk_conn: asyncssh.SSHClientConnection,
+    existing_job_ids: set[str],
+    timeout: float = DONE_TIMEOUT,
+) -> str:
+    """Wait for the newly submitted Flink job to appear and reach RUNNING."""
+    deadline = time.monotonic() + timeout
+    job_id: Optional[str] = None
+    last_status: Optional[str] = None
+
+    while time.monotonic() < deadline:
+        jobs = await _flink_list_jobs(snk_conn)
+
+        if job_id is None:
+            new_jobs = [
+                j for j in jobs
+                if isinstance(j, dict) and j.get("id") not in existing_job_ids
+            ]
+            if new_jobs:
+                job_id = str(new_jobs[0].get("id"))
+                print(f"  Flink job submitted: {job_id}")
+
+        if job_id is not None:
+            job = next(
+                (
+                    j for j in jobs
+                    if isinstance(j, dict) and str(j.get("id")) == job_id
+                ),
+                None,
+            )
+            if job is not None:
+                status = str(job.get("status", "UNKNOWN"))
+                if status != last_status:
+                    print(f"  Flink job {job_id}: {status}")
+                    last_status = status
+
+                if status == "RUNNING":
+                    return job_id
+
+                if status in {"RESTARTING", "FAILING", "FAILED", "CANCELLING", "CANCELED", "SUSPENDED"}:
+                    raise FlinkJobRetryableError(
+                        f"Flink job {job_id} entered terminal/error state {status!r}."
+                    )
+
+                if status == "FINISHED":
+                    raise RuntimeError(
+                        f"Flink job {job_id} finished before CAPSys profiling could attach."
+                    )
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    if job_id is None:
+        raise TimeoutError(
+            f"Timed out after {timeout:.0f}s waiting for submitted Flink job to appear"
+        )
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink job {job_id} to reach RUNNING"
+    )
+
+
+async def _cancel_flink_job(
+    snk_conn: asyncssh.SSHClientConnection,
+    job_id: str,
+    timeout: float = 60,
+) -> None:
+    """Cancel a Flink job via REST and wait until it disappears or is canceled."""
+    result = await snk_conn.run(
+        f"curl -sS -o /dev/null -w '%{{http_code}}' -X PATCH http://127.0.0.1:8081/jobs/{job_id}",
+        check=False,
+    )
+    status_code = (result.stdout or "").strip()
+    if result.exit_status != 0:
+        raise RuntimeError(
+            f"Failed to request cancellation for Flink job {job_id}.\n"
+            f"stderr: {(result.stderr or '').strip()}"
+        )
+    if status_code == "409":
+        print(f"  Flink job {job_id}: already finished; ignoring cancel conflict")
+        return
+    if status_code and status_code not in {"200", "202"}:
+        raise RuntimeError(
+            f"Failed to request cancellation for Flink job {job_id}.\n"
+            f"HTTP status: {status_code}\n"
+            f"stderr: {(result.stderr or '').strip()}"
+        )
+
+    deadline = time.monotonic() + timeout
+    last_status: Optional[str] = None
+    while time.monotonic() < deadline:
+        jobs = await _flink_list_jobs(snk_conn)
+        job = next(
+            (
+                j for j in jobs
+                if isinstance(j, dict) and str(j.get("id")) == job_id
+            ),
+            None,
+        )
+        if job is None:
+            return
+
+        status = str(job.get("status", "UNKNOWN"))
+        if status != last_status:
+            print(f"  Flink job {job_id}: {status}")
+            last_status = status
+
+        if status in {"CANCELED", "FAILED", "FINISHED", "SUSPENDED"}:
+            return
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"Timed out after {timeout:.0f}s waiting for Flink job {job_id} to cancel"
+    )
+
+
 async def _wait_nes_topology_workers_ready(
     snk_conn: asyncssh.SSHClientConnection,
     nes_name: str,
     expected_count: int,
     timeout: float = NES_CLUSTER_READY_TIMEOUT,
-) -> None:
+) -> dict[str, Any]:
     """Wait until NES topology REST reports all worker nodes.
 
     expected_count includes the coordinator-local worker.
     """
     if expected_count <= 0:
-        return
+        return {}
 
     deadline = time.monotonic() + timeout
     last_seen = -1
-    topology_cmd = (
-        f"for p in /v1/nes/topology /nes/topology; do "
-        f"curl -fsS http://127.0.0.1:{NES_REST_PORT}$p && exit 0; "
-        "done; exit 1"
-    )
+    topology_cmd = _nes_topology_fetch_cmd()
 
     while time.monotonic() < deadline:
         # Fail fast if the coordinator crashed before workers registered.
@@ -974,7 +1212,7 @@ async def _wait_nes_topology_workers_ready(
                 print(f"  NES topology nodes: {seen}/{expected_count}")
                 last_seen = seen
             if seen >= expected_count:
-                return
+                return payload if isinstance(payload, dict) else {}
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -982,6 +1220,272 @@ async def _wait_nes_topology_workers_ready(
         f"Timed out after {timeout:.0f}s waiting for NES topology workers "
         f"({expected_count} expected, last seen {max(last_seen, 0)})."
     )
+
+
+def _nes_topology_fetch_cmd() -> str:
+    return (
+        f"for p in /v1/nes/topology /nes/topology; do "
+        f"curl -fsS http://127.0.0.1:{NES_REST_PORT}$p && exit 0; "
+        "done; exit 1"
+    )
+
+
+def _rewrite_nes_query_sink_host(query: str, sink_host: str) -> str:
+    """Replace the TcpSinkDescriptor host with the topology sink address."""
+    pattern = r'TcpSinkDescriptor::create\("([^"]+)"\s*,'
+    replacement = f'TcpSinkDescriptor::create("{sink_host}",'
+    rewritten, count = re.subn(pattern, replacement, query, count=1)
+    if count == 0:
+        raise RuntimeError(
+            "Failed to locate TcpSinkDescriptor in NES query for sink host rewrite."
+        )
+    return rewritten
+
+
+def _extract_nes_topology_nodes(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def _walk_keyed_values(value: Any, *, key: str = "") -> list[tuple[str, Any]]:
+    found: list[tuple[str, Any]] = []
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            found.extend(_walk_keyed_values(child_value, key=str(child_key)))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_walk_keyed_values(item, key=key))
+    else:
+        found.append((key, value))
+    return found
+
+
+def _parse_worker_id(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _extract_nes_worker_id(node: dict[str, Any]) -> Optional[int]:
+    preferred_keys = ("workerid", "id")
+
+    keyed_values = _walk_keyed_values(node)
+    for key_name in preferred_keys:
+        for key, value in keyed_values:
+            if key.lower() != key_name:
+                continue
+            worker_id = _parse_worker_id(value)
+            if worker_id is not None:
+                return worker_id
+    return None
+
+
+def _normalize_host_candidates(raw: str) -> set[str]:
+    candidates: set[str] = set()
+    value = raw.strip()
+    if not value:
+        return candidates
+
+    candidates.add(value)
+
+    parsed = urlparse(value)
+    if parsed.hostname:
+        candidates.add(parsed.hostname)
+
+    if "://" not in value and value.count(":") == 1:
+        host_part = value.split(":", 1)[0].strip()
+        if host_part:
+            candidates.add(host_part)
+
+    return candidates
+
+
+def _extract_nes_worker_addresses(node: dict[str, Any]) -> set[str]:
+    addresses: set[str] = set()
+    for key, value in _walk_keyed_values(node):
+        if not isinstance(value, str):
+            continue
+        key_name = key.lower()
+        if not any(token in key_name for token in ("host", "addr", "ip")):
+            continue
+        addresses.update(_normalize_host_candidates(value))
+    return addresses
+
+
+def _map_topology_workers_to_nes_ids(
+    payload: dict[str, Any],
+    worker_nodes: list[NodeInfo],
+) -> dict[str, int]:
+    address_to_topology_id: dict[str, str] = {}
+    for worker in worker_nodes:
+        for candidate in (worker.address, worker.host):
+            for normalized in _normalize_host_candidates(candidate):
+                existing = address_to_topology_id.get(normalized)
+                if existing and existing != worker.id:
+                    raise RuntimeError(
+                        "NES topology mapping is ambiguous: "
+                        f"address {normalized!r} matches both {existing!r} and {worker.id!r}."
+                    )
+                address_to_topology_id[normalized] = worker.id
+
+    mapping: dict[str, int] = {}
+    unresolved = {worker.id for worker in worker_nodes}
+    unmatched_nodes: list[dict[str, Any]] = []
+
+    for node in _extract_nes_topology_nodes(payload):
+        worker_id = _extract_nes_worker_id(node)
+        if worker_id is None:
+            unmatched_nodes.append(node)
+            continue
+
+        matched_topology_id: Optional[str] = None
+        for address in _extract_nes_worker_addresses(node):
+            topology_id = address_to_topology_id.get(address)
+            if topology_id is None:
+                continue
+            matched_topology_id = topology_id
+            break
+
+        if matched_topology_id is None:
+            unmatched_nodes.append(node)
+            continue
+
+        existing = mapping.get(matched_topology_id)
+        if existing is not None and existing != worker_id:
+            raise RuntimeError(
+                "NES topology mapping is inconsistent: "
+                f"topology node {matched_topology_id!r} matched worker IDs {existing} and {worker_id}."
+            )
+
+        mapping[matched_topology_id] = worker_id
+        unresolved.discard(matched_topology_id)
+
+    if unresolved:
+        available = [
+            {
+                "workerId": _extract_nes_worker_id(node),
+                "addresses": sorted(_extract_nes_worker_addresses(node)),
+            }
+            for node in _extract_nes_topology_nodes(payload)
+        ]
+        raise RuntimeError(
+            "Failed to map all topology workers to NES worker IDs. "
+            f"Unresolved topology nodes: {sorted(unresolved)}. "
+            f"REST topology nodes: {available}"
+        )
+
+    return mapping
+
+
+def _load_explicit_topology_edges(topology_file: str) -> list[tuple[str, str]]:
+    with open(topology_file) as f:
+        raw = _json.load(f)
+
+    edges = raw.get("edges", [])
+    if not isinstance(edges, list):
+        return []
+
+    explicit_edges: list[tuple[str, str]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        source = edge.get("source")
+        target = edge.get("target")
+        if isinstance(source, str) and isinstance(target, str):
+            explicit_edges.append((source, target))
+    return explicit_edges
+
+
+def _desired_nes_topology_links(
+    topology_file: str,
+    worker_topology_ids: set[str],
+) -> list[tuple[str, str]]:
+    """Return NES parent->child links derived from source->sink topology edges."""
+    desired_links: list[tuple[str, str]] = []
+    seen_links: set[tuple[str, str]] = set()
+
+    for source_id, target_id in _load_explicit_topology_edges(topology_file):
+        if source_id not in worker_topology_ids or target_id not in worker_topology_ids:
+            continue
+
+        # Topology edges flow source->sink, while NES parent-child links point
+        # upstream toward the sink: A->B becomes parent=B, child=A.
+        link = (target_id, source_id)
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+        desired_links.append(link)
+
+    return desired_links
+
+
+async def _reconcile_nes_worker_topology(
+    *,
+    snk_conn: asyncssh.SSHClientConnection,
+    topology_file: str,
+    worker_nodes: list[NodeInfo],
+    rest_payload: dict[str, Any],
+) -> None:
+    desired_links = _desired_nes_topology_links(
+        topology_file,
+        {worker.id for worker in worker_nodes},
+    )
+    if not desired_links:
+        print("  NES topology has no explicit compute-to-compute links; keeping default parent assignments.")
+        return
+
+    topology_to_worker_id = _map_topology_workers_to_nes_ids(rest_payload, worker_nodes)
+    readable_mapping = ", ".join(
+        f"{topology_id}={worker_id}"
+        for topology_id, worker_id in sorted(topology_to_worker_id.items())
+    )
+    print(f"  NES worker ID mapping: {readable_mapping}")
+
+    explicit_children = {
+        topology_to_worker_id[child_topology_id]
+        for _, child_topology_id in desired_links
+    }
+    for child_id in sorted(explicit_children):
+        delete_payload = _json.dumps({"parentId": 1, "childId": child_id})
+        delete_cmd = (
+            f"curl -fsS -X DELETE http://127.0.0.1:{NES_REST_PORT}/v1/nes/topology/removeAsChild "
+            f"-H 'Content-Type: application/json' "
+            f"-d {shlex.quote(delete_payload)}"
+        )
+        delete_result = await snk_conn.run(delete_cmd, check=False)
+        if delete_result.exit_status != 0:
+            stderr = (delete_result.stderr or "").strip()
+            if "404" not in stderr:
+                raise RuntimeError(
+                    "Failed to remove default NES parent-child link "
+                    f"1->{child_id}: {stderr or delete_result.stdout or 'no output'}"
+                )
+
+    for parent_topology_id, child_topology_id in desired_links:
+        parent_id = topology_to_worker_id[parent_topology_id]
+        child_id = topology_to_worker_id[child_topology_id]
+        if parent_id == child_id:
+            raise RuntimeError(
+                f"Refusing to create self-link for NES worker {parent_topology_id!r} (workerId={parent_id})."
+            )
+
+        add_payload = _json.dumps({"parentId": parent_id, "childId": child_id})
+        add_cmd = (
+            f"curl -fsS -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/topology/addAsChild "
+            f"-H 'Content-Type: application/json' "
+            f"-d {shlex.quote(add_payload)}"
+        )
+        await _run(snk_conn, add_cmd)
+
+    print(f"  Reconciled {len(desired_links)} NES parent-child link(s) from topology.")
 
 
 # ── Config generators ─────────────────────────────────────────────────────────
@@ -1006,6 +1510,11 @@ def _coordinator_config(
             f"  placement-method: {placement_method}",
             "",
         ]
+        if placement_method.strip().upper() == "CAPSYS":
+            lines += [
+                "cluster.capsys.scheduler-cfg.path: /conf/schedulercfg",
+                "",
+            ]
     lines += [
         "pipeline.operator-chaining.enabled: false",
         "",
@@ -1204,7 +1713,6 @@ logicalSources:
 def _nes_worker_config(
     worker_host: str,
     coordinator_host: str,
-    worker_id: int,
     source_host: Optional[str] = None,
 ) -> str:
     cfg = f"""\
@@ -1258,8 +1766,6 @@ physicalSources:
 
 """
     cfg += f"""\
-workerId: {worker_id}
-
 parentId: 1
 """
     return cfg
@@ -1361,6 +1867,130 @@ def _rewrite_sql_tcp_hosts(sql_content: str, source_host: str, sink_host: str) -
     return rewritten, src_count, snk_count
 
 
+def _resolve_capsys_python() -> str:
+    """Return a Python interpreter that can run the CAPSys scripts locally."""
+    candidates = [
+        sys.executable,
+        str(Path("venv/bin/python")),
+        str(Path(".venv/bin/python")),
+        "python3",
+    ]
+    probe = "import networkx, numpy, pandas, requests"
+    seen: set[str] = set()
+
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+
+        candidate_path = Path(candidate)
+        if candidate not in ("python3",) and not candidate_path.exists():
+            continue
+
+        result = subprocess.run(
+            [candidate, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+
+    raise RuntimeError(
+        "No local Python interpreter with CAPSys dependencies found. "
+        "Install the CLI extras/dependencies and ensure numpy, pandas, requests, "
+        "and networkx are available."
+    )
+
+
+async def _run_local_command(cmd: list[str], *, cwd: Optional[Path] = None) -> None:
+    """Run a local command and stream its output to the terminal."""
+    print(f"  Running local command: {shlex.join(cmd)}")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd) if cwd is not None else None,
+    )
+    rc = await proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"Local command failed (exit {rc}): {shlex.join(cmd)}")
+
+
+def _capsys_local_run_dirs(config_path: Path) -> list[Path]:
+    config_key = config_path.name.replace(".", "")
+    return [
+        Path(f"{config_key}_profile_iter0"),
+        Path(f"{config_key}_custom_iter1"),
+    ]
+
+
+def _clear_local_capsys_artifacts(config_path: Path, output_name: str) -> None:
+    for run_dir in _capsys_local_run_dirs(config_path):
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+
+    output_file = CAPSYS_DIR / f"schedulercfg_{output_name}"
+    if output_file.exists():
+        output_file.unlink()
+
+
+def _patch_capsys_config(
+    config_path: Path,
+    *,
+    worker_ips: list[str],
+    workers_slot: int,
+    jm_host: str,
+    jm_port: int,
+    prometheus_port: int,
+) -> None:
+    config = _json.loads(config_path.read_text())
+    config["iplist"] = worker_ips
+    config["workers_slot"] = workers_slot
+    config["jmip"] = jm_host
+    config["jmpt"] = jm_port
+    config["prometheus_port"] = prometheus_port
+    config_path.write_text(_json.dumps(config, indent=2) + "\n")
+
+
+def _capsys_schedulercfg_path(query: str, topology_name: str, rep_index: int) -> Path:
+    return CAPSYS_DIR / f"schedulercfg_{query}_{topology_name}_{rep_index}"
+
+
+async def _stage_capsys_schedulercfg(
+    *,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    query: str,
+    topology_name: str,
+    rep_index: int,
+) -> None:
+    local_cfg = _capsys_schedulercfg_path(query, topology_name, rep_index)
+    if not local_cfg.exists():
+        raise FileNotFoundError(
+            "CAPSYS schedulercfg not found for experiment repetition: "
+            f"{local_cfg}. Run 'sim profile' first for this query/topology/repetition."
+        )
+
+    remote_cfg = f"{snk_home}/flinke2c-conf/schedulercfg"
+    await _upload_local_text_file(snk_conn, local_cfg, remote_cfg)
+    print(f"  Staged CAPSYS placement: {local_cfg.name} -> {remote_cfg}")
+
+
+@asynccontextmanager
+async def _forward_local_port(
+    conn: asyncssh.SSHClientConnection,
+    *,
+    remote_host: str,
+    remote_port: int,
+):
+    """Forward a remote TCP port to an ephemeral local port."""
+    listener = await conn.forward_local_port("127.0.0.1", 0, remote_host, remote_port)
+    try:
+        yield listener.get_port()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+
 # ── Per-experiment logic ───────────────────────────────────────────────────────
 
 async def _run_flink_repetition(
@@ -1375,6 +2005,7 @@ async def _run_flink_repetition(
     sink_name: str,
     combined_sql: str,
     lib_jars: list[Path],
+    topology_name: str,
 ) -> None:
     """Submit the SQL query and wait for sink completion and Flink job finish.
 
@@ -1389,11 +2020,26 @@ async def _run_flink_repetition(
         for j in await _flink_list_jobs(snk_conn)
         if isinstance(j, dict) and j.get("id")
     }
+    max_runtime_s = (
+        exp.max_query_runtime / 1000.0
+        if exp.max_query_runtime is not None
+        else None
+    )
 
     sql_lib_mounts = " ".join(
         f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
         for j in lib_jars
     )
+
+    if exp.placement_method.strip().upper() == "CAPSYS":
+        await _stage_capsys_schedulercfg(
+            snk_conn=snk_conn,
+            snk_home=snk_home,
+            query=exp.query,
+            topology_name=topology_name,
+            rep_index=rep - 1,
+        )
+
     # ── Submit SQL query ───────────────────────────────────────────────────
     print(f"  Submitting query '{exp.query}'...")
     await _upload_text(snk_conn, combined_sql, f"{snk_home}/flink_query.sql")
@@ -1408,12 +2054,48 @@ async def _run_flink_repetition(
     ])))
 
     # ── Wait for completion ────────────────────────────────────────────────
+    job_id = await _wait_flink_job_running(snk_conn, existing_job_ids)
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
-    await asyncio.gather(
-        _wait_sink_done(snk_conn, sink_name, since=rep_start),
-        _wait_flink_job_finished(snk_conn, existing_job_ids),
-    )
-    print(f"  Repetition {rep} complete.")
+    sink_task = asyncio.create_task(_wait_sink_done(snk_conn, sink_name, since=rep_start))
+    job_task = asyncio.create_task(_wait_flink_job_terminal(snk_conn, job_id))
+
+    try:
+        if max_runtime_s is None:
+            await asyncio.gather(sink_task, job_task)
+            print(f"  Repetition {rep} complete.")
+            return
+
+        done, pending = await asyncio.wait(
+            {sink_task, job_task},
+            timeout=max_runtime_s,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        if not pending:
+            print(f"  Repetition {rep} complete.")
+            return
+
+        print(
+            f"  Max query runtime reached after {exp.max_query_runtime} ms; "
+            f"cancelling Flink job {job_id} via REST..."
+        )
+        await _cancel_flink_job(snk_conn, job_id)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            await _wait_sink_done(snk_conn, sink_name, since=rep_start, timeout=30)
+        except TimeoutError:
+            print(
+                f"  Sink did not emit '{DONE_SIGNAL}' within 30s after cancellation; "
+                "continuing with experiment teardown."
+            )
+        print(f"  Repetition {rep} reached max runtime and was canceled.")
+    finally:
+        if not sink_task.done():
+            sink_task.cancel()
+        if not job_task.done():
+            job_task.cancel()
+        await asyncio.gather(sink_task, job_task, return_exceptions=True)
 
 
 async def _run_flink_experiment(
@@ -1432,13 +2114,23 @@ async def _run_flink_experiment(
     lib_jars: list[Path],
     qcfg: dict,
     output_dir: Path,
+    attempt: int = 1,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
     skip_log_download_on_retryable_failure: bool = False,
 ) -> None:
     per_query  = qcfg.get(exp.query, {})
-    task_slots = exp.num_task_slots or per_query.get("num_task_slots", 1)
-    bid_extra  = per_query.get("bid_src_extra_arg", "")
+    task_slots = (
+        exp.num_task_slots
+        if exp.num_task_slots is not None
+        else per_query.get("num_task_slots", 1)
+    )
+    bid_extra = (
+        exp.bid_src_extra_arg
+        if exp.bid_src_extra_arg is not None
+        else per_query.get("bid_src_extra_arg", "")
+    )
+    topology_name = Path(topology_file).stem
 
     # Load SQL
     query_sql_path = QUERIES_DIR / f"{exp.query}.sql"
@@ -1533,6 +2225,7 @@ async def _run_flink_experiment(
     worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
 
     download_logs = True
+    retryable_failure = False
     try:
         # Upload Flink configs once
         print("  Uploading Flink configs...")
@@ -1619,6 +2312,9 @@ async def _run_flink_experiment(
             FLINK_IMAGE,
             "jobmanager",
         ])))
+        await _assert_running(snk_conn, jm_name)
+        print(f"  Waiting {FLINK_JOBMANAGER_START_DELAY}s before starting taskmanagers...")
+        await asyncio.sleep(FLINK_JOBMANAGER_START_DELAY)
 
         print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
         async def _start_taskmanager(wn: NodeInfo) -> None:
@@ -1671,10 +2367,10 @@ async def _run_flink_experiment(
                 sink_name=sink_name,
                 combined_sql=combined_sql,
                 lib_jars=lib_jars,
+                topology_name=topology_name,
             )
     except FlinkJobRetryableError:
-        if skip_log_download_on_retryable_failure:
-            download_logs = False
+        retryable_failure = True
         raise
     finally:
         print("  Stopping containers...")
@@ -1686,10 +2382,18 @@ async def _run_flink_experiment(
         for wn in worker_nodes:
             await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
 
+        download_target = output_dir
+        if retryable_failure and skip_log_download_on_retryable_failure:
+            download_target = _retry_attempt_output_dir(output_dir, attempt)
+            print(
+                "  Retryable failure detected; downloading preliminary results to "
+                f"{download_target} before retry."
+            )
+
         if not download_logs:
-            print("  Skipping log download because the experiment will be retried.")
+            print("  Skipping log download.")
         else:
-            # Always download logs — even if a repetition failed
+            # Always download logs — even if a repetition failed.
             print("\n  Preprocessing remote latency logs before download...")
             await asyncio.gather(
                 _run_remote_latency_preprocessing(
@@ -1708,13 +2412,347 @@ async def _run_flink_experiment(
                 ),
             )
 
-            print(f"\n  Downloading logs to {output_dir}/...")
-            if output_dir.exists():
-                shutil.rmtree(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            await _download_logs(src_conn, f"{src_home}/logs", output_dir / src.id)
-            await _download_logs(snk_conn, f"{snk_home}/logs", output_dir / snk.id)
-            print(f"  Logs saved to {output_dir}")
+            print(f"\n  Downloading logs to {download_target}/...")
+            if download_target.exists():
+                shutil.rmtree(download_target)
+            download_target.mkdir(parents=True, exist_ok=True)
+            await _download_logs(src_conn, f"{src_home}/logs", download_target / src.id)
+            await _download_logs(snk_conn, f"{snk_home}/logs", download_target / snk.id)
+            print(f"  Logs saved to {download_target}")
+
+
+async def _run_flink_profile_query(
+    *,
+    exp: ExperimentSpec,
+    topology_file: str,
+    graph: nx.Graph,
+    src: NodeInfo,
+    src_conn: asyncssh.SSHClientConnection,
+    src_home: str,
+    snk: NodeInfo,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    worker_nodes: list[NodeInfo],
+    worker_conns: dict[str, asyncssh.SSHClientConnection],
+    worker_homes: dict[str, str],
+    lib_jars: list[Path],
+    qcfg: dict,
+    capsys_python: str,
+    latency: bool = True,
+) -> None:
+    per_query = qcfg.get(exp.query, {})
+    task_slots = (
+        exp.num_task_slots
+        if exp.num_task_slots is not None
+        else per_query.get("num_task_slots", 1)
+    )
+    bid_extra = (
+        exp.bid_src_extra_arg
+        if exp.bid_src_extra_arg is not None
+        else per_query.get("bid_src_extra_arg", "")
+    )
+    topology_name = Path(topology_file).stem
+    base_output_name = f"{exp.query}_{topology_name}"
+    profile_placement_method = ""
+
+    query_sql_path = QUERIES_DIR / f"{exp.query}.sql"
+    setup_sql_path = QUERIES_DIR / "setup.sql"
+    if not query_sql_path.exists():
+        raise FileNotFoundError(f"Query file not found: {query_sql_path}")
+
+    combined_sql = ""
+    if setup_sql_path.exists():
+        combined_sql += setup_sql_path.read_text() + "\n"
+    combined_sql += query_sql_path.read_text()
+    combined_sql, src_rewrites, snk_rewrites = _rewrite_sql_tcp_hosts(
+        combined_sql, source_host=src.address, sink_host=snk.address
+    )
+    if src_rewrites or snk_rewrites:
+        print(
+            "  Rewrote SQL TCP connector hosts "
+            f"(sources={src_rewrites} -> {src.address}, sinks={snk_rewrites} -> {snk.address})"
+        )
+
+    if exp.placement_method:
+        print(
+            f"  Ignoring placement_method={exp.placement_method!r} during profiling; "
+            "CAPSys profiling runs without Flink placement enabled."
+        )
+
+    graphml_content: Optional[str] = None
+    graphml_filename: str = ""
+
+    graphml_path = f"/conf/{graphml_filename}" if graphml_filename else ""
+    coordinator_cfg = _coordinator_config(snk.address, profile_placement_method, graphml_path)
+    worker_cfgs = {
+        wn.id: _worker_config(snk.address, wn.address, task_slots)
+        for wn in worker_nodes
+    }
+
+    prom_remote_dir = f"{snk_home}/prometheus"
+    prom_remote_cfg = f"{prom_remote_dir}/prometheus.yml"
+    latency_arg = "--latency" if latency else ""
+    _kill_all = "docker ps -aq | xargs -r docker rm -f 2>/dev/null || true"
+    exp_id = f"profile-{exp.query}-{int(time.time())}"
+    bid_name = f"tcp-bid-{exp_id}"
+    auction_name = f"tcp-auction-{exp_id}"
+    person_name = f"tcp-person-{exp_id}"
+    sink_name = f"tcp-sink-{exp_id}"
+    jm_name = f"flink-jm-{exp_id}"
+    prom_name = f"prometheus-{exp_id}"
+    tm_names = {wn.id: f"flink-tm-{wn.id}-{exp_id}" for wn in worker_nodes}
+    worker_containers = {wn.id: [tm_names[wn.id]] for wn in worker_nodes}
+
+    await _run(src_conn, _kill_all, check=False)
+    await _run(snk_conn, _kill_all, check=False)
+    for wn in worker_nodes:
+        await _run(worker_conns[wn.id], _kill_all, check=False)
+
+    print("  Clearing remote logs...")
+    clear_jobs = [
+        _clear_remote_path(src_conn, f"{src_home}/logs/"),
+        _clear_remote_path(snk_conn, f"{snk_home}/logs/"),
+    ]
+    clear_jobs.extend(
+        _clear_remote_path(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
+    )
+    await asyncio.gather(*clear_jobs)
+    verify_jobs = [
+        _assert_remote_dir_empty(src_conn, f"{src_home}/logs/"),
+        _assert_remote_dir_empty(snk_conn, f"{snk_home}/logs/"),
+    ]
+    verify_jobs.extend(
+        _assert_remote_dir_empty(worker_conns[wn.id], f"{worker_homes[wn.id]}/logs/")
+        for wn in worker_nodes
+    )
+    await asyncio.gather(*verify_jobs)
+
+    try:
+        print("  Uploading Flink and Prometheus configs...")
+        await _upload_text(snk_conn, coordinator_cfg, f"{snk_home}/flinke2c-conf/config.yaml")
+        await _ensure_remote_dir(snk_conn, prom_remote_dir)
+        await _upload_local_text_file(snk_conn, PROMETHEUS_CONFIG_FILE, prom_remote_cfg)
+        for wn in worker_nodes:
+            await _upload_text(
+                worker_conns[wn.id], worker_cfgs[wn.id],
+                f"{worker_homes[wn.id]}/flinke2c-conf/config.yaml",
+            )
+
+        if profile_placement_method and graphml_content is not None:
+            print(f"  Uploading graphml ({graphml_filename})...")
+            await _upload_text(
+                snk_conn, graphml_content,
+                f"{snk_home}/flinke2c-conf/{graphml_filename}",
+            )
+
+        print("  Starting bid source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {bid_name}",
+            f"-v {src_home}/logs/bids:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/bid_events.parquet",
+            f"--address 0.0.0.0:10000 --schema bid --exp-name {exp.name}",
+            f"--rate {CAPSYS_SOURCE_RATE}",
+            latency_arg,
+            bid_extra,
+        ])).strip())
+        await _assert_running(src_conn, bid_name)
+
+        print("  Starting auction source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {auction_name}",
+            f"-v {src_home}/logs/auctions:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/auction_events.parquet",
+            f"--address 0.0.0.0:10001 --schema auction --exp-name {exp.name}",
+            f"--rate {CAPSYS_SOURCE_RATE}",
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, auction_name)
+
+        print("  Starting person source...")
+        await _run(src_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {person_name}",
+            f"-v {src_home}/logs/persons:/opt/tcp/logs",
+            f"-v {src_home}/data:/data:ro",
+            TCP_IMAGE,
+            "source /data/person_events.parquet",
+            f"--address 0.0.0.0:10002 --schema person --exp-name {exp.name}",
+            f"--rate {CAPSYS_SOURCE_RATE}",
+            latency_arg,
+        ])))
+        await _assert_running(src_conn, person_name)
+
+        print("  Starting sink...")
+        await _run(snk_conn, " ".join(filter(None, [
+            "docker run --privileged -d -i --init --network=host",
+            f"--name {sink_name}",
+            f"-v {snk_home}/logs:/opt/tcp/logs",
+            TCP_IMAGE,
+            f"sink --exp-name {exp.name}",
+            latency_arg,
+        ])))
+        await _assert_running(snk_conn, sink_name)
+
+        jm_lib_mounts = " ".join(
+            f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+            for j in lib_jars
+        )
+        print("  Starting Flink jobmanager...")
+        await _run(snk_conn, " ".join(filter(None, [
+            "docker run --privileged -d --network=host",
+            f"--name {jm_name}",
+            f"-v {snk_home}/flinke2c-conf:/conf/",
+            jm_lib_mounts,
+            FLINK_IMAGE,
+            "jobmanager",
+        ])))
+        await _assert_running(snk_conn, jm_name)
+        print(f"  Waiting {FLINK_JOBMANAGER_START_DELAY}s before starting taskmanagers...")
+        await asyncio.sleep(FLINK_JOBMANAGER_START_DELAY)
+
+        print(f"  Starting {len(worker_nodes)} taskmanager(s)...")
+
+        async def _start_taskmanager(wn: NodeInfo) -> None:
+            wh = worker_homes[wn.id]
+            tm_lib_mounts = " ".join(
+                f"-v {wh}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+                for j in lib_jars
+            )
+            await _run(worker_conns[wn.id], " ".join(filter(None, [
+                "docker run --privileged -d --network=host",
+                f"--name {tm_names[wn.id]}",
+                _cpus_flag(wn),
+                f"-v {wh}/flinke2c-conf:/conf/",
+                tm_lib_mounts,
+                FLINK_IMAGE,
+                "taskmanager",
+            ])))
+            await _assert_running(worker_conns[wn.id], tm_names[wn.id])
+
+        await asyncio.gather(*(_start_taskmanager(wn) for wn in worker_nodes))
+
+        print("  Starting Prometheus...")
+        await _run(snk_conn, " ".join([
+            "docker run -d --network=host",
+            f"--name {prom_name}",
+            f"-v {prom_remote_cfg}:/etc/prometheus/prometheus.yml:ro",
+            PROMETHEUS_IMAGE,
+            "--config.file=/etc/prometheus/prometheus.yml",
+            "--web.listen-address=0.0.0.0:9090",
+        ]))
+        await _assert_running(snk_conn, prom_name)
+
+        print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
+        await asyncio.gather(
+            _poll_for_pattern(src_conn, bid_name, READY_SIGNAL, timeout=READY_TIMEOUT, label=bid_name),
+            _poll_for_pattern(src_conn, auction_name, READY_SIGNAL, timeout=READY_TIMEOUT, label=auction_name),
+            _poll_for_pattern(src_conn, person_name, READY_SIGNAL, timeout=READY_TIMEOUT, label=person_name),
+        )
+        print("  Sources are ready.")
+        print(f"  Waiting for Flink REST to report {len(worker_nodes)} taskmanager(s)...")
+        await _wait_flink_taskmanagers_ready(
+            snk_conn=snk_conn,
+            jm_name=jm_name,
+            expected_count=len(worker_nodes),
+        )
+        print("  Flink cluster is ready.")
+
+        for rep in range(exp.repetitions):
+            output_name = f"{base_output_name}_{rep}"
+            _clear_local_capsys_artifacts(CAPSYS_CONFIG_OUTPUT, output_name)
+            print(f"\n  --- Repetition {rep + 1}/{exp.repetitions} ---")
+
+            existing_job_ids = {
+                str(j.get("id"))
+                for j in await _flink_list_jobs(snk_conn)
+                if isinstance(j, dict) and j.get("id")
+            }
+            sql_name = f"flink-sql-profile-{exp.query}-rep{rep}-{int(time.time())}"
+            sql_lib_mounts = " ".join(
+                f"-v {snk_home}/flinke2c-lib/{j.name}:/opt/flink/lib/{j.name}:ro"
+                for j in lib_jars
+            )
+            print(f"  Submitting query '{exp.query}' for CAPSys profiling...")
+            await _upload_text(snk_conn, combined_sql, f"{snk_home}/flink_query.sql")
+            await _run(snk_conn, " ".join(filter(None, [
+                "docker run --privileged -d --rm --network=host",
+                f"--name {sql_name}",
+                f"-v {snk_home}/flinke2c-conf:/conf/",
+                f"-v {snk_home}/flink_query.sql:/tmp/flink_query.sql:ro",
+                sql_lib_mounts,
+                FLINK_IMAGE,
+                "sql-client embedded -f /tmp/flink_query.sql",
+            ])))
+
+            job_id = await _wait_flink_job_running(snk_conn, existing_job_ids)
+            print(f"  Profiling Flink job {job_id}...")
+
+            async with _forward_local_port(
+                snk_conn, remote_host="127.0.0.1", remote_port=8081
+            ) as local_rest_port, _forward_local_port(
+                snk_conn, remote_host="127.0.0.1", remote_port=9090
+            ) as local_prom_port:
+                await _run_local_command([
+                    capsys_python,
+                    str(CAPSYS_GENERATOR_SCRIPT),
+                    "--template",
+                    str(CAPSYS_CONFIG_TEMPLATE),
+                    "--output",
+                    str(CAPSYS_CONFIG_OUTPUT),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(local_rest_port),
+                    "--job-id",
+                    job_id,
+                    "--source-rate",
+                    str(CAPSYS_SOURCE_RATE),
+                ])
+                _patch_capsys_config(
+                    CAPSYS_CONFIG_OUTPUT,
+                    worker_ips=[wn.address for wn in worker_nodes],
+                    workers_slot=task_slots,
+                    jm_host="127.0.0.1",
+                    jm_port=local_rest_port,
+                    prometheus_port=local_prom_port,
+                )
+                await _run_local_command([
+                    capsys_python,
+                    str(CAPSYS_RUNDS_SCRIPT),
+                    str(CAPSYS_CONFIG_OUTPUT),
+                    "attach",
+                    "profile",
+                    "0",
+                    "custom",
+                ])
+
+            print(f"  Cancelling Flink job {job_id}...")
+            await _cancel_flink_job(snk_conn, job_id)
+            await _run_local_command([
+                capsys_python,
+                str(CAPSYS_RUNDS_SCRIPT),
+                str(CAPSYS_CONFIG_OUTPUT),
+                "plan",
+                "custom",
+                "1",
+                "custom",
+                output_name,
+            ])
+            print(f"  Generated {CAPSYS_DIR / ('schedulercfg_' + output_name)}")
+    finally:
+        print("  Stopping containers...")
+        await _graceful_stop_tcp(src_conn, [bid_name, auction_name, person_name])
+        await _graceful_stop_tcp(snk_conn, [sink_name])
+        await _stop_containers(snk_conn, [jm_name, prom_name])
+        for wn in worker_nodes:
+            await _stop_containers(worker_conns[wn.id], worker_containers[wn.id])
 
 
 # ── NES experiment logic ──────────────────────────────────────────────────────
@@ -1750,6 +2788,7 @@ async def _run_nes_repetition(
 
 async def _run_nes_experiment(
     exp: ExperimentSpec,
+    topology_file: str,
     src: NodeInfo,
     src_conn: asyncssh.SSHClientConnection,
     src_home: str,
@@ -1761,24 +2800,25 @@ async def _run_nes_experiment(
     worker_homes: dict[str, str],
     output_dir: Path,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
         raise FileNotFoundError(f"NES query file not found: {query_path}")
-    query_str = query_path.read_text().strip()
+    query_str = _rewrite_nes_query_sink_host(
+        query_path.read_text().strip(),
+        snk.address,
+    )
 
     # Build configs
     coordinator_cfg = _nes_coordinator_config(snk.address)
     # Workers: first compute node gets physicalSources pointing to src
     worker_cfgs: dict[str, str] = {}
     for idx, wn in enumerate(worker_nodes):
-        worker_id   = idx + 2   # coordinator=1; workers start at 2
         source_host = src.address if idx == 0 else None
         worker_cfgs[wn.id] = _nes_worker_config(
             worker_host=wn.address,
             coordinator_host=snk.address,
-            worker_id=worker_id,
             source_host=source_host,
         )
 
@@ -1928,12 +2968,19 @@ async def _run_nes_experiment(
             "  Waiting for NES topology to report "
             f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
         )
-        await _wait_nes_topology_workers_ready(
+        rest_payload = await _wait_nes_topology_workers_ready(
             snk_conn=snk_conn,
             nes_name=nes_name,
             expected_count=expected_nes_nodes,
         )
         print("  NES cluster is ready.")
+        print("  Reconciling NES worker topology...")
+        await _reconcile_nes_worker_topology(
+            snk_conn=snk_conn,
+            topology_file=topology_file,
+            worker_nodes=worker_nodes,
+            rest_payload=rest_payload,
+        )
 
         for rep in range(1, exp.repetitions + 1):
             await _run_nes_repetition(
@@ -1991,7 +3038,7 @@ async def run_experiments(
     passphrase: Optional[str] = None,
     skip_data_upload: bool = False,
     start_with_rep: Optional[int] = None,
-    latency: bool = False,
+    latency: bool = True,
 ) -> None:
     graph = load_topology(topology_file)
     nodes = load_nodes(topology_file)
@@ -2022,15 +3069,13 @@ async def run_experiments(
 
     # Open SSH connections
     print("\nConnecting to nodes...")
-    src_conn = await asyncssh.connect(**_conn_kwargs(src, key_path, passphrase))
-    snk_conn = await asyncssh.connect(**_conn_kwargs(snk, key_path, passphrase))
+    src_conn = await _connect_node(src, key_path, passphrase)
+    snk_conn = await _connect_node(snk, key_path, passphrase)
     worker_conns: dict[str, asyncssh.SSHClientConnection] = {}
 
     try:
         for wn in worker_nodes:
-            worker_conns[wn.id] = await asyncssh.connect(
-                **_conn_kwargs(wn, key_path, passphrase)
-            )
+            worker_conns[wn.id] = await _connect_node(wn, key_path, passphrase)
 
         # Resolve home directories for SFTP (~ is not expanded by SFTP protocol)
         src_home = await _get_home(src_conn)
@@ -2077,6 +3122,7 @@ async def run_experiments(
             if exp.system == "nes":
                 await _run_nes_experiment(
                     exp=exp,
+                    topology_file=topology_file,
                     src=src,
                     src_conn=src_conn,
                     src_home=src_home,
@@ -2116,6 +3162,7 @@ async def run_experiments(
                             lib_jars=lib_jars,
                             qcfg=qcfg,
                             output_dir=output_base / exp.name,
+                            attempt=attempt,
                             start_with_rep=start_with_rep,
                             latency=latency,
                             skip_log_download_on_retryable_failure=(
@@ -2137,6 +3184,130 @@ async def run_experiments(
                 raise ValueError(f"Unknown system: {exp.system!r}. Supported: 'flink', 'nes'")
 
         print("\nAll experiments complete.")
+
+    finally:
+        for conn in worker_conns.values():
+            conn.close()
+        snk_conn.close()
+        src_conn.close()
+
+
+async def run_profiles(
+    experiments: list[ExperimentSpec],
+    topology_file: str,
+    key_path: str,
+    passphrase: Optional[str] = None,
+    skip_data_upload: bool = False,
+    latency: bool = True,
+) -> None:
+    graph = load_topology(topology_file)
+    nodes = load_nodes(topology_file)
+    qcfg = load_query_config()
+    profile_experiments = select_profile_experiments(experiments)
+
+    if not profile_experiments:
+        raise RuntimeError("No Flink experiments found to profile.")
+
+    if not PROMETHEUS_CONFIG_FILE.exists():
+        raise RuntimeError(
+            f"Prometheus config not found at {PROMETHEUS_CONFIG_FILE}. "
+            "Run 'sim setup' first or regenerate the Prometheus config."
+        )
+
+    capsys_python = _resolve_capsys_python()
+
+    src_list = [n for n in nodes.values() if n.node_type == "source"]
+    if not src_list:
+        raise RuntimeError(
+            "No node with node_type='source' found in topology. "
+            "The source node runs the TCP sources."
+        )
+    src = src_list[0]
+
+    sink_list = [n for n in nodes.values() if n.node_type == "sink"]
+    if not sink_list:
+        raise RuntimeError(
+            "No node with node_type='sink' found in topology. "
+            "A dedicated sink/coordinator node is required."
+        )
+    snk = sink_list[0]
+
+    worker_nodes = [n for n in nodes.values() if n.node_type not in ("source", "sink")]
+
+    print(f"Source / coordinator : {src.id}  ({src.host})")
+    print(f"Sink node            : {snk.id}  ({snk.host})")
+    print(f"Worker nodes         : {[n.id for n in worker_nodes]}")
+    print(f"CAPSys queries       : {[exp.query for exp in profile_experiments]}")
+
+    print("\nConnecting to nodes...")
+    src_conn = await asyncssh.connect(**_conn_kwargs(src, key_path, passphrase))
+    snk_conn = await asyncssh.connect(**_conn_kwargs(snk, key_path, passphrase))
+    worker_conns: dict[str, asyncssh.SSHClientConnection] = {}
+
+    try:
+        for wn in worker_nodes:
+            worker_conns[wn.id] = await asyncssh.connect(
+                **_conn_kwargs(wn, key_path, passphrase)
+            )
+
+        src_home = await _get_home(src_conn)
+        snk_home = await _get_home(snk_conn)
+        worker_homes = {
+            wn.id: await _get_home(worker_conns[wn.id]) for wn in worker_nodes
+        }
+
+        print("\nPreparing remote directories...")
+        await _ensure_remote_dir(src_conn, f"{src_home}/data")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/bids")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/auctions")
+        await _ensure_remote_dir(src_conn, f"{src_home}/logs/persons")
+        await _ensure_remote_dir(src_conn, f"{src_home}/flinke2c-conf")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/logs")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/flinke2c-conf")
+        await _ensure_remote_dir(snk_conn, f"{snk_home}/flinke2c-lib")
+        for wn in worker_nodes:
+            wh = worker_homes[wn.id]
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/logs")
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/flinke2c-conf")
+            await _ensure_remote_dir(worker_conns[wn.id], f"{wh}/flinke2c-lib")
+
+        if not skip_data_upload:
+            await _sync_source_data(src, src_home, key_path)
+
+        lib_jars = sorted(FLINK_LIB_DIR.glob("*.jar")) if FLINK_LIB_DIR.exists() else []
+        if lib_jars:
+            print("\nSyncing Flink lib JARs...")
+            await _sync_flink_libs(snk, snk_home, key_path)
+            for wn in worker_nodes:
+                await _sync_flink_libs(wn, worker_homes[wn.id], key_path)
+
+        for exp in profile_experiments:
+            print(f"\n{'='*60}")
+            print(
+                f"CAPSys profile : {exp.query}  [{Path(topology_file).stem}]"
+                f"   Reps: {exp.repetitions}"
+            )
+            print(f"{'='*60}")
+            await _run_flink_profile_query(
+                exp=exp,
+                topology_file=topology_file,
+                graph=graph,
+                src=src,
+                src_conn=src_conn,
+                src_home=src_home,
+                snk=snk,
+                snk_conn=snk_conn,
+                snk_home=snk_home,
+                worker_nodes=worker_nodes,
+                worker_conns=worker_conns,
+                worker_homes=worker_homes,
+                lib_jars=lib_jars,
+                qcfg=qcfg,
+                capsys_python=capsys_python,
+                latency=latency,
+            )
+
+        print("\nCAPSys profiling complete.")
 
     finally:
         for conn in worker_conns.values():

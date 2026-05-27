@@ -22,7 +22,7 @@
 # Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
 # exp_management/configs/flink/query_config.yml and can be overridden here.
 
-repetitions: 11
+repetitions: 10
 
 experiments:
   - name: flink_q1_cloud
