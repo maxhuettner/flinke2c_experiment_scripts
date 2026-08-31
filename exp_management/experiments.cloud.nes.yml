@@ -53,7 +53,6 @@ experiments:
   #   query: q4
   #   placement_method: TOP_DOWN
   #   nes_num_slots: 6
-  #   nes_coordinator_num_slots: 1
 
   # - name: nes_q5_cloud
   #   system: nes
@@ -71,7 +70,7 @@ experiments:
     query: q4_nes
     source_schema: nes
 
-  - name: flink_q5_nes
-    system: flink
-    query: q5_nes
-    source_schema: nes
+  # - name: flink_q5_nes
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes

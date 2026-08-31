@@ -358,6 +358,7 @@ async def _run(conn: asyncssh.SSHClientConnection, cmd: str, *, check: bool = Tr
     if check and result.exit_status != 0:
         raise RuntimeError(
             f"Remote command failed (exit {result.exit_status}): {cmd!r}\n"
+            f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         )
     return (result.stdout or "").strip()
@@ -2894,7 +2895,7 @@ async def _run_nes_repetition(
     nes_placement = NES_PLACEMENT_STRATEGY_MAP.get(exp.placement_method.strip().upper(), "TopDown")
     payload = _json.dumps({"userQuery": query_str, "placement": nes_placement})
     curl_cmd = (
-        f"curl -s -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/query/execute-query"
+        f"curl -sS -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/query/execute-query"
         f" -H 'Content-Type: application/json'"
         f" -d '{payload}'"
     )
@@ -2920,6 +2921,7 @@ async def _run_nes_experiment(
     worker_conns: dict[str, asyncssh.SSHClientConnection],
     worker_homes: dict[str, str],
     output_dir: Path,
+    qcfg: dict,
     start_with_rep: Optional[int] = None,
     latency: bool = True,
 ) -> None:
@@ -2934,6 +2936,12 @@ async def _run_nes_experiment(
         query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
         raise FileNotFoundError(f"NES query file not found: {query_path}")
+    per_query = qcfg.get(exp.query, {})
+    bid_extra = (
+        exp.bid_src_extra_arg
+        if exp.bid_src_extra_arg is not None
+        else per_query.get("bid_src_extra_arg", "")
+    )
     query_str = _rewrite_nes_query_sink_host(
         query_path.read_text().strip(),
         snk.address,
@@ -3017,6 +3025,7 @@ async def _run_nes_experiment(
             f"--address 0.0.0.0:10000 --system nes --schema bid --exp-name {exp.name}",
             start_with_rep_arg,
             latency_arg,
+            bid_extra,
         ])))
         await _assert_running(src_conn, bid_name)
 
@@ -3267,6 +3276,7 @@ async def run_experiments(
                     worker_conns=worker_conns,
                     worker_homes=worker_homes,
                     output_dir=output_base / exp.name,
+                    qcfg=qcfg,
                     start_with_rep=start_with_rep,
                     latency=latency,
                 )
