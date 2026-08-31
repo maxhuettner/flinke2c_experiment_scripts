@@ -15,7 +15,7 @@ WITH
     'parallelism' = '1'
   );
 
-ADD JAR 'file:///lib/flinke2c.jar';
+-- ADD JAR 'file:///lib/flinke2c.jar';
 
 CREATE TEMPORARY FUNCTION CurrencyConversionFunction AS 'org.example.flinke2c.CurrencyConversionFunction';
 

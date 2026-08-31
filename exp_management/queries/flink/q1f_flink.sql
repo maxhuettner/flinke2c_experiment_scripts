@@ -14,7 +14,7 @@ WITH
     'port' = '9000'
   );
 
-ADD JAR 'file:///lib/flinke2c.jar';
+-- ADD JAR 'file:///lib/flinke2c.jar';
 
 CREATE TEMPORARY FUNCTION PriceGreaterThan AS 'org.example.flinke2c.PriceGreaterThan';
 
