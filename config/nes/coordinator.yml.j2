@@ -21,6 +21,7 @@ worker:
   numberOfBuffersInGlobalBufferManager: 4096
   numberOfBuffersInSourceLocalBufferPool: 1024
   bufferSizeInBytes: 262144
+  # numberOfSlots: 1
 
   queryCompiler:
     maxHashTableSize: 2147483648
@@ -51,6 +52,10 @@ logicalSources:
         type: INT64
 #      - name: extra
 #        type: TEXT
+{% if nes_latency_enabled | default(true) | bool %}
+      - name: latency_ts
+        type: INT64
+{% endif %}
 
   - logicalSourceName: persons
     fields:
@@ -70,6 +75,10 @@ logicalSources:
         type: INT64
 #      - name: extra
 #        type: TEXT
+{% if nes_latency_enabled | default(true) | bool %}
+      - name: latency_ts
+        type: INT64
+{% endif %}
 
   - logicalSourceName: auctions
     fields:
@@ -93,3 +102,7 @@ logicalSources:
         type: INT64
 #      - name: extra
 #        type: TEXT
+{% if nes_latency_enabled | default(true) | bool %}
+      - name: latency_ts
+        type: INT64
+{% endif %}

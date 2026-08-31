@@ -19,6 +19,12 @@ Per-query extra args and task slot counts are read from
 exp_management/configs/flink/query_config.yml and can be overridden with
 `num_task_slots` in the experiment YAML.
 
+`source_schema: nes` (system: flink only) tells the TCP source generator to
+emit NES's trimmed field set instead of the full schema, and loads
+setup_nes.sql instead of setup.sql. Pair it with a `_nes`-suffixed query file
+(e.g. query: q1_nes) that only references fields NES also has, for a
+byte-for-byte-comparable flink-vs-nes run.
+
 Usage:
     sim experiment \\
         -f config/topologies/edge-to-cloud.json \\
@@ -107,11 +113,24 @@ class ExperimentSpec:
     system: str = "flink"
     query: str = ""
     repetitions: int = 1
-    placement_method: str = ""      # "" or e.g. "TOP_DOWN"
+    placement_method: str = ""      # "" (default) or e.g. "TOP_DOWN"; for system: flink
+                                     # enables topology-aware placement (graphml), for
+                                     # system: nes selects the NES placement strategy
+                                     # sent as "placement" on /execute-query (mapped via
+                                     # NES_PLACEMENT_STRATEGY_MAP; "" -> NES's own TopDown default)
     num_task_slots: Optional[int] = None
     bid_src_extra_arg: Optional[str] = None
     max_query_runtime: Optional[int] = None  # milliseconds; cancel Flink job via REST when exceeded
     graphml_file: str = ""          # explicit graphml filename in coordinator dir, e.g. "cloud.graphml"
+    source_schema: str = ""         # "" (full schema) or "nes" (trimmed schema + tells the TCP source
+                                     # generator to emit the NES-compatible field set, for fair flink-vs-nes runs)
+    nes_num_slots: Optional[int] = None  # numberOfSlots for NES workers; None = unlimited
+    nes_coordinator_num_slots: int = 1   # numberOfSlots for the NES coordinator's own worker role
+    flink_rocksdb: Optional[bool] = None  # state.backend: rocksdb (system: flink only).
+                                     # None = on (current default). Off relies purely on the
+                                     # instance-type-sized heap (see _flink_process_memory_mb)
+                                     # to avoid the GC-death-spiral/heartbeat-timeout failure
+                                     # RocksDB was added to work around for q4's 24h window state.
 
 
 @dataclass
@@ -122,6 +141,29 @@ class NodeInfo:
     node_type: str  # "source" / "sink" / "compute"
     address: str    # overlay/topology address
     speed: Optional[int] = None  # CPU cap in % (e.g. 50 → --cpus 0.50)
+    instance_type: str = "t3.micro"  # cloud instance type, from topology (for memory sizing)
+
+
+# Total RAM (MiB) for the cloud instance types used in config/topologies/*.json.
+# Source: AWS EC2 published instance specs. Extend as new types show up there.
+AWS_INSTANCE_MEMORY_MB: dict[str, int] = {
+    "t3.micro": 1024,
+    "t4g.medium": 4096,
+    "m6g.medium": 4096,
+    "c6g.medium": 2048,
+    "c6g.large": 4096,
+}
+
+
+def _flink_process_memory_mb(instance_type: str, fraction: float, fallback_mb: int) -> int:
+    """Flink process memory (MiB) as a fraction of the node's total RAM, leaving
+    the rest for the OS/Docker (and, on the sink node, the co-located tcp-sink
+    container). Falls back to fallback_mb for an instance type we don't have
+    specs for, rather than guessing."""
+    total = AWS_INSTANCE_MEMORY_MB.get(instance_type)
+    if total is None:
+        return fallback_mb
+    return int(total * fraction)
 
 
 class FlinkJobRetryableError(RuntimeError):
@@ -137,6 +179,9 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
     global_num_task_slots = raw.get("num_task_slots")
     global_bid_src_extra_arg = raw.get("bid_src_extra_arg")
     global_max_query_runtime = raw.get("max_query_runtime")
+    global_nes_num_slots = raw.get("nes_num_slots")
+    global_nes_coordinator_num_slots = raw.get("nes_coordinator_num_slots", 1)
+    global_flink_rocksdb = raw.get("flink_rocksdb")
     return [
         ExperimentSpec(
             name=e["name"],
@@ -148,6 +193,12 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
             bid_src_extra_arg=e.get("bid_src_extra_arg", global_bid_src_extra_arg),
             max_query_runtime=e.get("max_query_runtime", global_max_query_runtime),
             graphml_file=e.get("graphml_file", ""),
+            source_schema=e.get("source_schema", ""),
+            nes_num_slots=e.get("nes_num_slots", global_nes_num_slots),
+            nes_coordinator_num_slots=int(
+                e.get("nes_coordinator_num_slots", global_nes_coordinator_num_slots)
+            ),
+            flink_rocksdb=e.get("flink_rocksdb", global_flink_rocksdb),
         )
         for e in raw.get("experiments", [])
     ]
@@ -222,6 +273,7 @@ def load_nodes(topology_file: str) -> dict[str, NodeInfo]:
             node_type=topo.node_type.lower(),
             address=topo.address,
             speed=topo.speed,
+            instance_type=topo.instance_type,
         )
     return nodes
 
@@ -1494,7 +1546,13 @@ def _coordinator_config(
     jm_address: str,
     placement_method: str = "",
     graphml_path: str = "",
+    instance_type: str = "t3.micro",
+    use_rocksdb: bool = True,
 ) -> str:
+    # The JobManager shares its node with the tcp-sink container, so it only
+    # gets half the instance's memory rather than the near-all share the
+    # dedicated TaskManager nodes get in _worker_config.
+    jm_memory_mb = _flink_process_memory_mb(instance_type, fraction=0.5, fallback_mb=600)
     lines = [
         "parallelism:",
         "  default: 1",
@@ -1525,7 +1583,7 @@ def _coordinator_config(
         "    port: 6123",
         "  memory:",
         "    process:",
-        "      size: 600m",
+        f"      size: {jm_memory_mb}m",
         "",
         "rest:",
         f"  address: {jm_address}",
@@ -1541,43 +1599,44 @@ def _coordinator_config(
             "",
         ]
     lines += [
+        # GC heap-layout tuning is kept (it's a real JVM performance knob, not
+        # overhead specific to Flink); verbose GC logging is dropped since it's
+        # pure diagnostic I/O with no NES counterpart and no benefit here.
         "env:",
         "  java:",
         "    opts:",
         "      all: >-",
-        "        -verbose:gc -XX:NewRatio=3 -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
-        " -XX:ParallelGCThreads=4 --add-opens=java.base/java.util=ALL-UNNAMED",
-        "      jobmanager: >-",
-        "        -Xms256m -Xmx768m",
-        "        -Xloggc:$FLINK_LOG_DIR/jobmanager-gc.log",
-        "        -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=2 -XX:GCLogFileSize=512M",
-        "      taskmanager: >-",
-        "        -Xloggc:$FLINK_LOG_DIR/taskmanager-gc.log",
-        "        -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=2 -XX:GCLogFileSize=512M",
+        "        -XX:NewRatio=3 -XX:ParallelGCThreads=4"
+        " --add-opens=java.base/java.util=ALL-UNNAMED",
         "",
-        "state:",
-        "  backend:",
-        "    type: rocksdb",
-        "    incremental: true",
-        "    local-recovery: true",
-        "  checkpoints:",
-        "    dir: file:///tmp/checkpoint",
-        "",
-        "state.backend.rocksdb.localdir: /tmp",
-        "",
-        "execution:",
-        "  checkpointing:",
-        "    interval: 180000",
-        "    mode: EXACTLY_ONCE",
-        "    checkpoints-after-tasks-finish:",
-        "      enabled: false",
-        "",
+    ]
+    # Checkpointing itself stays disabled either way (periodic snapshotting
+    # has no NES equivalent). use_rocksdb toggles the state backend: q4's
+    # join sits inside a 24h window that never naturally closes during a
+    # normal run, so all matched state accumulates for the whole run. On
+    # HashMapStateBackend (Flink's default, used when this is off) that state
+    # lives entirely on-heap, which previously GC-death-spiraled into a
+    # TaskManager heartbeat timeout on the old fixed heap size - observed in
+    # practice, not just theoretical. RocksDB avoids that by keeping state
+    # off-heap/on-disk (independent of whether checkpointing runs), at the
+    # cost of serializing every state access - noticeably slower. Now that
+    # taskmanager memory is sized from the real instance type instead of a
+    # fixed 1728m (see _flink_process_memory_mb), it's worth testing whether
+    # the extra heap alone is enough without RocksDB's overhead.
+    if use_rocksdb:
+        lines += [
+            "state:",
+            "  backend:",
+            "    type: rocksdb",
+            "",
+            "state.backend.rocksdb.localdir: /tmp",
+            "",
+        ]
+    lines += [
         "table:",
         "  exec:",
         "    mini-batch:",
-        "      enabled: true",
-        "      allow-latency: 2s",
-        "      size: 50000",
+        "      enabled: false",
         "  optimizer:",
         "    distinct-agg:",
         "      split:",
@@ -1586,7 +1645,15 @@ def _coordinator_config(
     return "\n".join(lines) + "\n"
 
 
-def _worker_config(jm_address: str, tm_host: str, task_slots: int) -> str:
+def _worker_config(
+    jm_address: str,
+    tm_host: str,
+    task_slots: int,
+    instance_type: str = "t3.micro",
+) -> str:
+    # This node runs nothing but the TaskManager, so it gets almost the whole
+    # instance's memory - just enough held back for the OS/Docker daemon.
+    tm_memory_mb = _flink_process_memory_mb(instance_type, fraction=0.85, fallback_mb=1728)
     lines = [
         "env:",
         "  java:",
@@ -1624,7 +1691,7 @@ def _worker_config(jm_address: str, tm_host: str, task_slots: int) -> str:
         f"  numberOfTaskSlots: {task_slots}",
         "  memory:",
         "    process:",
-        "      size: 1728m",
+        f"      size: {tm_memory_mb}m",
         "",
         "parallelism:",
         "  default: 1",
@@ -1648,9 +1715,31 @@ def _worker_config(jm_address: str, tm_host: str, task_slots: int) -> str:
 
 # ── NES config generators ─────────────────────────────────────────────────────
 
-def _nes_coordinator_config(coordinator_host: str) -> str:
+def _nes_coordinator_config(
+    coordinator_host: str,
+    latency: bool = True,
+    num_slots: Optional[int] = 1,
+) -> str:
+    # The TCP source only puts a latency_ts value on the wire when started
+    # with --latency, so the field must not be declared here otherwise
+    # (see system_flag/latency_arg in _run_flink_experiment/_run_nes_experiment).
+    lat = (
+        "      - name: latency_ts\n"
+        "        type: INT64\n"
+        if latency
+        else ""
+    )
+    # num_slots caps how many operators the placement algorithm may pin onto
+    # this node; None leaves NES at its own (effectively unlimited) default.
+    # A too-low value (e.g. 1) can make TopDownStrategy placement hang in
+    # OPTIMIZING on star topologies where a pinned SOURCE/SINK's node has no
+    # spare slot left for a colocated operator (e.g. plain q1: source+map+sink).
+    slots = f"  numberOfSlots: {num_slots}\n" if num_slots is not None else ""
     return f"""\
 logLevel: LOG_ERROR
+
+optimizer:
+   distributedJoinOptimizationMode: MATRIX
 
 restIp: 127.0.0.1
 coordinatorHost: {coordinator_host}
@@ -1662,7 +1751,7 @@ worker:
   numberOfBuffersInGlobalBufferManager: 4096
   numberOfBuffersInSourceLocalBufferPool: 1024
   bufferSizeInBytes: 262144
-
+#{slots}
   queryCompiler:
     maxHashTableSize: 2147483648
     joinStrategy: HASH_JOIN_LOCAL
@@ -1683,14 +1772,14 @@ logicalSources:
         type: FLOAT64
       - name: dateTime
         type: INT64
-
+{lat}
   - logicalSourceName: persons
     fields:
       - name: id
         type: INT64
       - name: dateTime
         type: INT64
-
+{lat}
   - logicalSourceName: auctions
     fields:
       - name: id
@@ -1707,14 +1796,16 @@ logicalSources:
         type: INT64
       - name: category
         type: INT64
-"""
+{lat}"""
 
 
 def _nes_worker_config(
     worker_host: str,
     coordinator_host: str,
     source_host: Optional[str] = None,
+    num_slots: Optional[int] = None,
 ) -> str:
+    slots = f"numberOfSlots: {num_slots}\n" if num_slots is not None else ""
     cfg = f"""\
 logLevel: LOG_ERROR
 localWorkerHost: {worker_host}
@@ -1722,6 +1813,7 @@ coordinatorHost: {coordinator_host}
 numberOfBuffersInGlobalBufferManager: 4096
 numberOfBuffersInSourceLocalBufferPool: 1024
 bufferSizeInBytes: 262144
+#{slots}
 
 queryCompiler:
   maxHashTableSize: 2147483648
@@ -2134,7 +2226,9 @@ async def _run_flink_experiment(
 
     # Load SQL
     query_sql_path = QUERIES_DIR / f"{exp.query}.sql"
-    setup_sql_path = QUERIES_DIR / "setup.sql"
+    setup_sql_path = QUERIES_DIR / (
+        "setup_nes.sql" if exp.source_schema == "nes" else "setup.sql"
+    )
     if not query_sql_path.exists():
         raise FileNotFoundError(f"Query file not found: {query_sql_path}")
     combined_sql = ""
@@ -2173,9 +2267,12 @@ async def _run_flink_experiment(
             print(f"  Generating graphml dynamically (no static file found: {static_path})")
 
     graphml_path    = f"/conf/{graphml_filename}" if graphml_filename else ""
-    coordinator_cfg = _coordinator_config(snk.address, exp.placement_method, graphml_path)
+    use_rocksdb     = exp.flink_rocksdb if exp.flink_rocksdb is not None else True
+    coordinator_cfg = _coordinator_config(
+        snk.address, exp.placement_method, graphml_path, snk.instance_type, use_rocksdb
+    )
     worker_cfgs     = {
-        wn.id: _worker_config(snk.address, wn.address, task_slots)
+        wn.id: _worker_config(snk.address, wn.address, task_slots, wn.instance_type)
         for wn in worker_nodes
     }
 
@@ -2188,7 +2285,10 @@ async def _run_flink_experiment(
     jm_name      = f"flink-jm-{exp_id}"
     tm_names     = {wn.id: f"flink-tm-{wn.id}-{exp_id}" for wn in worker_nodes}
 
-    system_flag = "--system nes" if exp.system == "nes" else ""
+    # exp.system is always "flink" here; source_schema separately controls what
+    # field set the TCP source generator emits, so a "flink" run can be told to
+    # emit the NES-compatible (trimmed) schema for a fair flink-vs-nes comparison.
+    system_flag = f"--system {exp.source_schema}" if exp.source_schema else ""
     start_with_rep_arg = (
         f"--start-with-rep {start_with_rep}" if start_with_rep is not None else ""
     )
@@ -2483,9 +2583,12 @@ async def _run_flink_profile_query(
     graphml_filename: str = ""
 
     graphml_path = f"/conf/{graphml_filename}" if graphml_filename else ""
-    coordinator_cfg = _coordinator_config(snk.address, profile_placement_method, graphml_path)
+    use_rocksdb = exp.flink_rocksdb if exp.flink_rocksdb is not None else True
+    coordinator_cfg = _coordinator_config(
+        snk.address, profile_placement_method, graphml_path, snk.instance_type, use_rocksdb
+    )
     worker_cfgs = {
-        wn.id: _worker_config(snk.address, wn.address, task_slots)
+        wn.id: _worker_config(snk.address, wn.address, task_slots, wn.instance_type)
         for wn in worker_nodes
     }
 
@@ -2757,6 +2860,23 @@ async def _run_flink_profile_query(
 
 # ── NES experiment logic ──────────────────────────────────────────────────────
 
+# Maps placement_method (shared with the Flink "TOP_DOWN"-style convention) to
+# the exact NES::Optimizer::PlacementStrategy enum spelling expected by the
+# /execute-query REST endpoint's "placement" field. "" (unset) defaults to
+# TopDown, NES's own default strategy.
+NES_PLACEMENT_STRATEGY_MAP = {
+    "": "TopDown",
+    "TOP_DOWN": "TopDown",
+    "BOTTOM_UP": "BottomUp",
+    "IFCOP": "IFCOP",
+    "ILP": "ILP",
+    "ML_HEURISTIC": "MlHeuristic",
+    "ELEGANT_PERFORMANCE": "ELEGANT_PERFORMANCE",
+    "ELEGANT_ENERGY": "ELEGANT_ENERGY",
+    "ELEGANT_BALANCED": "ELEGANT_BALANCED",
+}
+
+
 async def _run_nes_repetition(
     *,
     rep: int,
@@ -2771,7 +2891,8 @@ async def _run_nes_repetition(
     rep_start = int(time.time())
     print(f"\n--- Repetition {rep}/{total_reps} ---")
 
-    payload = _json.dumps({"userQuery": query_str, "placement": "TopDown"})
+    nes_placement = NES_PLACEMENT_STRATEGY_MAP.get(exp.placement_method.strip().upper(), "TopDown")
+    payload = _json.dumps({"userQuery": query_str, "placement": nes_placement})
     curl_cmd = (
         f"curl -s -X POST http://127.0.0.1:{NES_REST_PORT}/v1/nes/query/execute-query"
         f" -H 'Content-Type: application/json'"
@@ -2802,7 +2923,15 @@ async def _run_nes_experiment(
     start_with_rep: Optional[int] = None,
     latency: bool = True,
 ) -> None:
-    query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
+    # Queries that aggregate/forward latency_ts (currently q4, q5) need a
+    # "_nolatency" variant for --no-latency runs, since the TCP source only
+    # puts latency_ts on the wire when started with --latency; q1 needs no
+    # variant because its plain .map() never references the field by name.
+    query_path = NES_QUERIES_DIR / (
+        f"{exp.query}_nolatency.txt" if not latency else f"{exp.query}.txt"
+    )
+    if not query_path.exists():
+        query_path = NES_QUERIES_DIR / f"{exp.query}.txt"
     if not query_path.exists():
         raise FileNotFoundError(f"NES query file not found: {query_path}")
     query_str = _rewrite_nes_query_sink_host(
@@ -2810,8 +2939,12 @@ async def _run_nes_experiment(
         snk.address,
     )
 
-    # Build configs
-    coordinator_cfg = _nes_coordinator_config(snk.address)
+    # Build configs. nes_coordinator_num_slots tunes the coordinator's own
+    # worker role (defaults to 1); nes_num_slots tunes the workers separately
+    # (defaults to unlimited/None when unset).
+    coordinator_cfg = _nes_coordinator_config(
+        snk.address, latency, num_slots=exp.nes_coordinator_num_slots
+    )
     # Workers: first compute node gets physicalSources pointing to src
     worker_cfgs: dict[str, str] = {}
     for idx, wn in enumerate(worker_nodes):
@@ -2820,6 +2953,7 @@ async def _run_nes_experiment(
             worker_host=wn.address,
             coordinator_host=snk.address,
             source_host=source_host,
+            num_slots=exp.nes_num_slots,
         )
 
     exp_id    = f"{exp.name}-{int(time.time())}"
