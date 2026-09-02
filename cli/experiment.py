@@ -87,6 +87,7 @@ NES_COORDINATOR_IMAGE = "maxhue/nes-coordinator"
 NES_WORKER_IMAGE      = "maxhue/nes-worker"
 NES_REST_PORT         = 8081
 NES_CLUSTER_READY_TIMEOUT = 120  # seconds to wait for NES topology workers
+NES_QUERY_PLACEMENT_TIMEOUT = 60  # seconds to wait for a submitted query to leave REGISTERED/OPTIMIZING
 
 READY_SIGNAL = "Reading & binary encoding done"
 DONE_SIGNAL  = "All connections closed, stopping logger"
@@ -131,6 +132,17 @@ class ExperimentSpec:
                                      # instance-type-sized heap (see _flink_process_memory_mb)
                                      # to avoid the GC-death-spiral/heartbeat-timeout failure
                                      # RocksDB was added to work around for q4's 24h window state.
+    nes_restart_after_stop: Optional[bool] = None  # system: nes only. None/False = current
+                                     # behavior (one coordinator+workers for all repetitions).
+                                     # True: after each repetition (except the last), stop and
+                                     # restart the NES coordinator and worker containers before
+                                     # submitting the next one. Works around repetition 2+
+                                     # consistently hanging in OPTIMIZING even after repetition
+                                     # 1's query stops - the coordinator's topology resource
+                                     # slots occupied by a stopped query don't appear to be
+                                     # released, so a long-lived coordinator effectively loses
+                                     # capacity every repetition. A fresh coordinator process has
+                                     # a fresh in-memory topology with all slots free.
 
 
 @dataclass
@@ -154,6 +166,13 @@ AWS_INSTANCE_MEMORY_MB: dict[str, int] = {
     "c6g.large": 4096,
 }
 
+# Used to derive NES's buffer-pool/hash-table sizing (_nes_memory_budget_mb)
+# from the same per-node budget Flink's TaskManager uses, instead of NES's
+# old fixed sizing that ignored node/instance_type entirely.
+NES_PROCESS_OVERHEAD_MB = 256
+NES_MIN_AVAILABLE_MB = 128
+NES_BUFFER_SIZE_BYTES = 262144
+
 
 def _flink_process_memory_mb(instance_type: str, fraction: float, fallback_mb: int) -> int:
     """Flink process memory (MiB) as a fraction of the node's total RAM, leaving
@@ -164,6 +183,38 @@ def _flink_process_memory_mb(instance_type: str, fraction: float, fallback_mb: i
     if total is None:
         return fallback_mb
     return int(total * fraction)
+
+
+def _worker_memory_mb(instance_type: str) -> int:
+    """Memory budget (MiB) for a dedicated worker node - one that runs nothing
+    but a single TaskManager/NES-worker process and so can use almost the
+    whole instance's memory, just enough held back for the OS/Docker daemon.
+    This is the single source of truth for that budget: Flink's TaskManager
+    uses it as its internal process.size, it's also applied as a docker
+    --memory cap on both the Flink TaskManager and the NES worker container
+    (see _worker_memory_flag) so the two engines are bounded by the same
+    per-node memory restriction on heterogeneous topologies, and NES's own
+    buffer-pool/hash-table sizing is derived from it too (see
+    _nes_memory_budget_mb) so NES pays a comparable "restricted node" tax
+    instead of running its old fixed sizing unconstrained on small nodes."""
+    return _flink_process_memory_mb(instance_type, fraction=0.85, fallback_mb=2048)
+
+
+def _nes_memory_budget_mb(instance_type: str) -> tuple[int, int]:
+    """(global_buffer_pool_mb, max_hash_table_mb) for an NES coordinator/worker,
+    sized off the same per-node budget as Flink's TaskManager
+    (_worker_memory_mb) instead of NES's old fixed 1024m buffer pool / 2048m
+    hash-table ceiling, which stayed the same size regardless of node and so
+    ran effectively unconstrained on small/on-prem nodes while Flink was
+    already boxed in. Reserves NES_PROCESS_OVERHEAD_MB for the native
+    process/OS (NES is a C++ process - no JVM metaspace/framework tax), then
+    splits what's left 1:2 between buffer pool and max hash-table size, the
+    same ratio as the old fixed defaults (1024m : 2048m)."""
+    total = _worker_memory_mb(instance_type)
+    available = max(total - NES_PROCESS_OVERHEAD_MB, NES_MIN_AVAILABLE_MB)
+    buffer_pool_mb = max(available // 3, 1)
+    max_hash_table_mb = available - buffer_pool_mb
+    return buffer_pool_mb, max_hash_table_mb
 
 
 class FlinkJobRetryableError(RuntimeError):
@@ -182,6 +233,7 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
     global_nes_num_slots = raw.get("nes_num_slots")
     global_nes_coordinator_num_slots = raw.get("nes_coordinator_num_slots", 1)
     global_flink_rocksdb = raw.get("flink_rocksdb")
+    global_nes_restart_after_stop = raw.get("nes_restart_after_stop")
     return [
         ExperimentSpec(
             name=e["name"],
@@ -199,6 +251,7 @@ def load_experiments(path: str) -> list[ExperimentSpec]:
                 e.get("nes_coordinator_num_slots", global_nes_coordinator_num_slots)
             ),
             flink_rocksdb=e.get("flink_rocksdb", global_flink_rocksdb),
+            nes_restart_after_stop=e.get("nes_restart_after_stop", global_nes_restart_after_stop),
         )
         for e in raw.get("experiments", [])
     ]
@@ -788,6 +841,15 @@ def _cpus_flag(node: NodeInfo) -> str:
     if node.speed is not None:
         return f"--cpus {node.speed / 100:.2f}"
     return ""
+
+
+def _worker_memory_flag(node: NodeInfo) -> str:
+    """Return a --memory docker flag sized from _worker_memory_mb(), so a
+    dedicated worker container (Flink TaskManager or NES worker) is bounded
+    by the same per-node memory budget on both engines - not just Flink,
+    which would otherwise self-limit via its own JVM config while an NES
+    worker container ran uncapped on the same node."""
+    return f"--memory {_worker_memory_mb(node.instance_type)}m"
 
 
 async def _sync_source_data(
@@ -1460,18 +1522,35 @@ def _load_explicit_topology_edges(topology_file: str) -> list[tuple[str, str]]:
 def _desired_nes_topology_links(
     topology_file: str,
     worker_topology_ids: set[str],
+    sink_topology_id: str,
 ) -> list[tuple[str, str]]:
-    """Return NES parent->child links derived from source->sink topology edges."""
+    """Return NES parent->child links derived from source->sink topology edges.
+
+    sink_topology_id is handled specially: it's not in worker_topology_ids
+    (the sink isn't a placement worker_node), but it IS a real NES worker
+    (the coordinator's own local worker role, always workerId 1 in practice).
+    An edge like "N1 -> snk" is a real link that should make N1 a direct
+    child of the coordinator - dropping it (treating sink_topology_id like
+    any other non-worker node, e.g. "src") would silently lose that
+    connection for any node that also happens to be a child in some other
+    worker-to-worker edge, since _reconcile_nes_worker_topology strips a
+    node's default root attachment as soon as it appears as a child anywhere.
+    """
     desired_links: list[tuple[str, str]] = []
     seen_links: set[tuple[str, str]] = set()
 
     for source_id, target_id in _load_explicit_topology_edges(topology_file):
-        if source_id not in worker_topology_ids or target_id not in worker_topology_ids:
+        if target_id == sink_topology_id:
+            if source_id not in worker_topology_ids:
+                continue
+            link = (sink_topology_id, source_id)
+        elif source_id not in worker_topology_ids or target_id not in worker_topology_ids:
             continue
+        else:
+            # Topology edges flow source->sink, while NES parent-child links
+            # point upstream toward the sink: A->B becomes parent=B, child=A.
+            link = (target_id, source_id)
 
-        # Topology edges flow source->sink, while NES parent-child links point
-        # upstream toward the sink: A->B becomes parent=B, child=A.
-        link = (target_id, source_id)
         if link in seen_links:
             continue
         seen_links.add(link)
@@ -1484,18 +1563,23 @@ async def _reconcile_nes_worker_topology(
     *,
     snk_conn: asyncssh.SSHClientConnection,
     topology_file: str,
+    snk: NodeInfo,
     worker_nodes: list[NodeInfo],
     rest_payload: dict[str, Any],
 ) -> None:
     desired_links = _desired_nes_topology_links(
         topology_file,
         {worker.id for worker in worker_nodes},
+        sink_topology_id=snk.id,
     )
     if not desired_links:
         print("  NES topology has no explicit compute-to-compute links; keeping default parent assignments.")
         return
 
-    topology_to_worker_id = _map_topology_workers_to_nes_ids(rest_payload, worker_nodes)
+    # Include snk in the ID mapping too - it's a real NES worker (the
+    # coordinator's own local worker role), needed to resolve any link
+    # produced above with sink_topology_id as the parent.
+    topology_to_worker_id = _map_topology_workers_to_nes_ids(rest_payload, worker_nodes + [snk])
     readable_mapping = ", ".join(
         f"{topology_id}={worker_id}"
         for topology_id, worker_id in sorted(topology_to_worker_id.items())
@@ -1552,8 +1636,11 @@ def _coordinator_config(
 ) -> str:
     # The JobManager shares its node with the tcp-sink container, so it only
     # gets half the instance's memory rather than the near-all share the
-    # dedicated TaskManager nodes get in _worker_config.
-    jm_memory_mb = _flink_process_memory_mb(instance_type, fraction=0.5, fallback_mb=600)
+    # dedicated TaskManager nodes get in _worker_config. fallback_mb applies
+    # to on-prem cluster nodes (no AWS instance_type/spec to size from) -
+    # 1024m clears the JobManager's fixed off-heap/metaspace/overhead floor
+    # with real heap left over, well under real cluster RAM.
+    jm_memory_mb = _flink_process_memory_mb(instance_type, fraction=0.5, fallback_mb=1024)
     lines = [
         "parallelism:",
         "  default: 1",
@@ -1652,9 +1739,7 @@ def _worker_config(
     task_slots: int,
     instance_type: str = "t3.micro",
 ) -> str:
-    # This node runs nothing but the TaskManager, so it gets almost the whole
-    # instance's memory - just enough held back for the OS/Docker daemon.
-    tm_memory_mb = _flink_process_memory_mb(instance_type, fraction=0.85, fallback_mb=1728)
+    tm_memory_mb = _worker_memory_mb(instance_type)
     lines = [
         "env:",
         "  java:",
@@ -1720,6 +1805,7 @@ def _nes_coordinator_config(
     coordinator_host: str,
     latency: bool = True,
     num_slots: Optional[int] = 1,
+    instance_type: str = "t3.micro",
 ) -> str:
     # The TCP source only puts a latency_ts value on the wire when started
     # with --latency, so the field must not be declared here otherwise
@@ -1736,6 +1822,10 @@ def _nes_coordinator_config(
     # OPTIMIZING on star topologies where a pinned SOURCE/SINK's node has no
     # spare slot left for a colocated operator (e.g. plain q1: source+map+sink).
     slots = f"  numberOfSlots: {num_slots}\n" if num_slots is not None else ""
+    buffer_pool_mb, max_hash_table_mb = _nes_memory_budget_mb(instance_type)
+    global_buffers = (buffer_pool_mb * 1024 * 1024) // NES_BUFFER_SIZE_BYTES
+    source_local_buffers = max(global_buffers // 4, 1)
+    max_hash_table_bytes = max_hash_table_mb * 1024 * 1024
     return f"""\
 logLevel: LOG_ERROR
 
@@ -1749,12 +1839,12 @@ restPort: {NES_REST_PORT}
 worker:
   localWorkerHost: {coordinator_host}
   coordinatorHost: {coordinator_host}
-  numberOfBuffersInGlobalBufferManager: 4096
-  numberOfBuffersInSourceLocalBufferPool: 1024
-  bufferSizeInBytes: 262144
-#{slots}
+  numberOfBuffersInGlobalBufferManager: {global_buffers}
+  numberOfBuffersInSourceLocalBufferPool: {source_local_buffers}
+  bufferSizeInBytes: {NES_BUFFER_SIZE_BYTES}
+{slots}
   queryCompiler:
-    maxHashTableSize: 2147483648
+    maxHashTableSize: {max_hash_table_bytes}
     joinStrategy: HASH_JOIN_LOCAL
     numberOfPartitions: 512
     preAllocPageCnt: 4
@@ -1805,19 +1895,24 @@ def _nes_worker_config(
     coordinator_host: str,
     source_host: Optional[str] = None,
     num_slots: Optional[int] = None,
+    instance_type: str = "t3.micro",
 ) -> str:
     slots = f"numberOfSlots: {num_slots}\n" if num_slots is not None else ""
+    buffer_pool_mb, max_hash_table_mb = _nes_memory_budget_mb(instance_type)
+    global_buffers = (buffer_pool_mb * 1024 * 1024) // NES_BUFFER_SIZE_BYTES
+    source_local_buffers = max(global_buffers // 4, 1)
+    max_hash_table_bytes = max_hash_table_mb * 1024 * 1024
     cfg = f"""\
 logLevel: LOG_ERROR
 localWorkerHost: {worker_host}
 coordinatorHost: {coordinator_host}
-numberOfBuffersInGlobalBufferManager: 4096
-numberOfBuffersInSourceLocalBufferPool: 1024
-bufferSizeInBytes: 262144
-#{slots}
+numberOfBuffersInGlobalBufferManager: {global_buffers}
+numberOfBuffersInSourceLocalBufferPool: {source_local_buffers}
+bufferSizeInBytes: {NES_BUFFER_SIZE_BYTES}
+{slots}
 
 queryCompiler:
-  maxHashTableSize: 2147483648
+  maxHashTableSize: {max_hash_table_bytes}
   joinStrategy: HASH_JOIN_LOCAL
   numberOfPartitions: 512
   preAllocPageCnt: 4
@@ -2428,6 +2523,7 @@ async def _run_flink_experiment(
                 "docker run --privileged -d --network=host",
                 f"--name {tm_names[wn.id]}",
                 _cpus_flag(wn),
+                _worker_memory_flag(wn),
                 f"-v {wh}/flinke2c-conf:/conf/",
                 tm_lib_mounts,
                 FLINK_IMAGE,
@@ -2733,6 +2829,7 @@ async def _run_flink_profile_query(
                 "docker run --privileged -d --network=host",
                 f"--name {tm_names[wn.id]}",
                 _cpus_flag(wn),
+                _worker_memory_flag(wn),
                 f"-v {wh}/flinke2c-conf:/conf/",
                 tm_lib_mounts,
                 FLINK_IMAGE,
@@ -2877,6 +2974,96 @@ NES_PLACEMENT_STRATEGY_MAP = {
     "ELEGANT_BALANCED": "ELEGANT_BALANCED",
 }
 
+# QueryState values (nebulastream-private nes-common/include/Util/QueryState.hpp)
+# a query can still be in before it's actually running, and terminal states
+# that mean it never will be.
+_NES_PRE_RUNNING_STATES = {"REGISTERED", "OPTIMIZING"}
+_NES_TERMINAL_FAILURE_STATES = {"STOPPED", "MARKED_FOR_FAILURE", "FAILED"}
+
+
+async def _wait_nes_query_running(
+    snk_conn: asyncssh.SSHClientConnection,
+    query_id: int,
+    timeout: float = NES_QUERY_PLACEMENT_TIMEOUT,
+) -> None:
+    """Poll NES's /query-status until the submitted query leaves REGISTERED/OPTIMIZING.
+
+    AddQueryRequest.cpp (nebulastream-private) enqueues the placement
+    amendment and returns without ever calling the amendment's getFuture()
+    - unlike StopQueryRequest/FailQueryRequest, which do. So when placement
+    genuinely fails (e.g. nes_num_slots/nes_coordinator_num_slots too tight
+    for the query's operator count), TopDownStrategy throws cleanly
+    (identifyPinningLocation: "No node available for further placement of
+    operators"), PlacementAmendmentInstance::execute() catches it and
+    resolves its completion promise to false - and nothing ever reads that
+    promise. The query's status just stays OPTIMIZING forever with no error
+    anywhere. Without this poll, _run_nes_repetition would silently wait out
+    the full sink-done timeout for a query that in fact never started.
+    """
+    deadline = time.monotonic() + timeout
+    status = "UNKNOWN"
+    status_cmd = (
+        f"curl -sS http://127.0.0.1:{NES_REST_PORT}"
+        f"/v1/nes/query/query-status?queryId={query_id}"
+    )
+    while time.monotonic() < deadline:
+        rest = await snk_conn.run(status_cmd, check=False)
+        if rest.exit_status == 0 and rest.stdout:
+            try:
+                payload = _json.loads(rest.stdout)
+            except _json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict) and "status" in payload:
+                status = payload["status"]
+            if status in _NES_TERMINAL_FAILURE_STATES:
+                raise RuntimeError(
+                    f"NES query {query_id} entered {status} before running. "
+                    "This usually means placement failed (nes_num_slots / "
+                    "nes_coordinator_num_slots too tight for the query's "
+                    "operator count)."
+                )
+            if status not in _NES_PRE_RUNNING_STATES:
+                return
+        await asyncio.sleep(POLL_INTERVAL)
+
+    raise TimeoutError(
+        f"NES query {query_id} still {status!r} after {timeout:.0f}s. "
+        "A placement failure never changes query status (AddQueryRequest "
+        "doesn't await its placement amendment's result), so this almost "
+        "always means nes_num_slots/nes_coordinator_num_slots are too "
+        "tight for the query's operator count - raise them and retry."
+    )
+
+
+async def _stop_nes_query(snk_conn: asyncssh.SSHClientConnection, query_id: int) -> bool:
+    """Explicitly stop a finished NES query via DELETE /stop-query.
+
+    A query that finishes on its own (source EOF -> soft stop) only updates
+    QueryCatalog's decomposed-plan status to STOPPED, for REST status
+    reporting - it never touches SharedQueryPlan's own status, so
+    PlacementRemovalStrategy (which releases the topology slots the query
+    occupied, via TopologyNode::releaseSlots) never runs. Only the explicit
+    DELETE /stop-query path (StopQueryRequest.cpp) does that. Unlike
+    /execute-query, it synchronously awaits the placement-removal amendment
+    before the HTTP response comes back (RequestHandlerService::
+    validateAndQueueStopQueryRequest calls future.get()), so this call
+    returning is enough confirmation - no separate poll needed. Without
+    this, a query's slots leak permanently on a long-lived coordinator,
+    since nothing else ever releases them (see nes_restart_after_stop,
+    which works around the same leak by restarting the whole cluster
+    instead of relying on this).
+    """
+    stop_cmd = (
+        f"curl -sS -X DELETE "
+        f"'http://127.0.0.1:{NES_REST_PORT}/v1/nes/query/stop-query?queryId={query_id}'"
+    )
+    rest = await snk_conn.run(stop_cmd, check=False)
+    if rest.exit_status != 0:
+        print(f"  Warning: failed to stop NES query {query_id}: {rest.stderr or rest.stdout}")
+        return False
+    print(f"  NES stop-query response for {query_id}: {rest.stdout}")
+    return True
+
 
 async def _run_nes_repetition(
     *,
@@ -2902,15 +3089,30 @@ async def _run_nes_repetition(
     print(f"  Submitting NES query '{exp.query}'...")
     result = await _run(snk_conn, curl_cmd)
     print(f"  NES response: {result}")
+    try:
+        query_id = _json.loads(result).get("queryId")
+    except _json.JSONDecodeError:
+        query_id = None
+    if query_id is not None:
+        print(f"  Waiting for query {query_id} to leave placement (REGISTERED/OPTIMIZING)...")
+        await _wait_nes_query_running(snk_conn, query_id)
+    else:
+        print("  Could not parse queryId from NES response; skipping placement check.")
 
     print(f"  Waiting for repetition to finish ('{DONE_SIGNAL}')...")
     await _wait_sink_done(snk_conn, sink_name, since=rep_start)
+
+    if query_id is not None:
+        print(f"  Stopping NES query {query_id} to release its topology slots...")
+        await _stop_nes_query(snk_conn, query_id)
+
     print(f"  Repetition {rep} complete.")
 
 
 async def _run_nes_experiment(
     exp: ExperimentSpec,
     topology_file: str,
+    graph: nx.Graph,
     src: NodeInfo,
     src_conn: asyncssh.SSHClientConnection,
     src_home: str,
@@ -2942,6 +3144,14 @@ async def _run_nes_experiment(
         if exp.bid_src_extra_arg is not None
         else per_query.get("bid_src_extra_arg", "")
     )
+    # experiments.*.yml (per-experiment, then its own global default) takes
+    # priority; query_config.yml's per-query entry is the fallback base
+    # default, same precedence as bid_src_extra_arg above.
+    restart_after_stop = (
+        exp.nes_restart_after_stop
+        if exp.nes_restart_after_stop is not None
+        else bool(per_query.get("nes_restart_after_stop", False))
+    )
     query_str = _rewrite_nes_query_sink_host(
         query_path.read_text().strip(),
         snk.address,
@@ -2951,17 +3161,37 @@ async def _run_nes_experiment(
     # worker role (defaults to 1); nes_num_slots tunes the workers separately
     # (defaults to unlimited/None when unset).
     coordinator_cfg = _nes_coordinator_config(
-        snk.address, latency, num_slots=exp.nes_coordinator_num_slots
+        snk.address, latency, num_slots=exp.nes_coordinator_num_slots,
+        instance_type=snk.instance_type,
     )
-    # Workers: first compute node gets physicalSources pointing to src
+    # Workers: the worker actually adjacent to src in the topology graph gets
+    # physicalSources pointing to src - not just "the first worker_nodes
+    # entry", which is topology-JSON declaration order and can put the
+    # source on a node the graph's own edges say it isn't connected to
+    # (e.g. a cloud node that's several on-prem hops away from src on
+    # paper). Wiring the source there means NES's ingestion point can skip
+    # right past the topology's weaker on-prem legs entirely, so TopDown
+    # placement never has a reason to route any real work through them.
+    source_neighbor_ids = set(graph.neighbors(src.id)) if src.id in graph else set()
+    source_worker = next(
+        (wn for wn in worker_nodes if wn.id in source_neighbor_ids), None
+    )
+    if source_worker is None:
+        # No worker_nodes entry is a direct graph-neighbor of src (e.g. src
+        # connects only to a non-worker node, or an unusual topology) - fall
+        # back to the prior behavior instead of silently dropping the
+        # source connection.
+        source_worker = worker_nodes[0] if worker_nodes else None
+
     worker_cfgs: dict[str, str] = {}
-    for idx, wn in enumerate(worker_nodes):
-        source_host = src.address if idx == 0 else None
+    for wn in worker_nodes:
+        source_host = src.address if wn is source_worker else None
         worker_cfgs[wn.id] = _nes_worker_config(
             worker_host=wn.address,
             coordinator_host=snk.address,
             source_host=source_host,
             num_slots=exp.nes_num_slots,
+            instance_type=wn.instance_type,
         )
 
     exp_id    = f"{exp.name}-{int(time.time())}"
@@ -3071,14 +3301,65 @@ async def _run_nes_experiment(
         await _assert_running(snk_conn, sink_name)
 
         # Start NES coordinator on snk
-        print("  Starting NES coordinator...")
-        await _run(snk_conn, " ".join([
-            "docker run --privileged -d --init --network=host",
-            f"--name {nes_name}",
-            f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
-            NES_COORDINATOR_IMAGE,
-        ]))
-        await _assert_running(snk_conn, nes_name)
+        async def _start_nes_coordinator() -> None:
+            print("  Starting NES coordinator...")
+            await _run(snk_conn, " ".join([
+                "docker run --privileged -d --init --network=host",
+                f"--name {nes_name}",
+                f"-v {snk_home}/nes-conf/coordinator.yaml:/config.yaml",
+                NES_COORDINATOR_IMAGE,
+            ]))
+            await _assert_running(snk_conn, nes_name)
+
+        # Start NES workers, then wait for them to register and reconcile the
+        # topology. Split from _start_nes_coordinator (rather than one
+        # combined "start cluster" step) because the initial startup path
+        # needs to wait for the TCP sources to be ready in between the two -
+        # a mid-experiment restart (nes_restart_after_stop) doesn't, since
+        # the sources keep running across repetitions.
+        expected_nes_nodes = len(worker_nodes) + 1  # +1 for coordinator-local worker
+
+        async def _start_nes_worker(wn: NodeInfo) -> None:
+            wh = worker_homes[wn.id]
+            await _run(worker_conns[wn.id], " ".join(filter(None, [
+                "docker run --privileged -d --init --network=host",
+                f"--name {wn_names[wn.id]}",
+                _cpus_flag(wn),
+                _worker_memory_flag(wn),
+                f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
+                NES_WORKER_IMAGE,
+            ])))
+            await _assert_running(worker_conns[wn.id], wn_names[wn.id])
+
+        async def _start_nes_workers_and_wait_ready() -> None:
+            print(f"  Starting {len(worker_nodes)} NES worker(s)...")
+            await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
+
+            print(
+                "  Waiting for NES topology to report "
+                f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
+            )
+            rest_payload = await _wait_nes_topology_workers_ready(
+                snk_conn=snk_conn,
+                nes_name=nes_name,
+                expected_count=expected_nes_nodes,
+            )
+            print("  NES cluster is ready.")
+            print("  Reconciling NES worker topology...")
+            await _reconcile_nes_worker_topology(
+                snk_conn=snk_conn,
+                topology_file=topology_file,
+                snk=snk,
+                worker_nodes=worker_nodes,
+                rest_payload=rest_payload,
+            )
+
+        async def _stop_nes_cluster() -> None:
+            await _stop_containers(snk_conn, [nes_name])
+            for wn in worker_nodes:
+                await _stop_containers(worker_conns[wn.id], [wn_names[wn.id]])
+
+        await _start_nes_coordinator()
 
         # Wait for sources to finish loading data
         print(f"  Waiting for TCP sources to report ready ('{READY_SIGNAL}')...")
@@ -3092,38 +3373,7 @@ async def _run_nes_experiment(
         )
         print("  Sources are ready.")
 
-        # Start NES workers on compute nodes
-        print(f"  Starting {len(worker_nodes)} NES worker(s)...")
-        async def _start_nes_worker(wn: NodeInfo) -> None:
-            wh = worker_homes[wn.id]
-            await _run(worker_conns[wn.id], " ".join(filter(None, [
-                "docker run --privileged -d --init --network=host",
-                f"--name {wn_names[wn.id]}",
-                _cpus_flag(wn),
-                f"-v {wh}/nes-conf/worker.yaml:/config.yaml",
-                NES_WORKER_IMAGE,
-            ])))
-            await _assert_running(worker_conns[wn.id], wn_names[wn.id])
-        await asyncio.gather(*(_start_nes_worker(wn) for wn in worker_nodes))
-
-        expected_nes_nodes = len(worker_nodes) + 1  # +1 for coordinator-local worker
-        print(
-            "  Waiting for NES topology to report "
-            f"{expected_nes_nodes} worker node(s) (includes coordinator worker)..."
-        )
-        rest_payload = await _wait_nes_topology_workers_ready(
-            snk_conn=snk_conn,
-            nes_name=nes_name,
-            expected_count=expected_nes_nodes,
-        )
-        print("  NES cluster is ready.")
-        print("  Reconciling NES worker topology...")
-        await _reconcile_nes_worker_topology(
-            snk_conn=snk_conn,
-            topology_file=topology_file,
-            worker_nodes=worker_nodes,
-            rest_payload=rest_payload,
-        )
+        await _start_nes_workers_and_wait_ready()
 
         for rep in range(1, exp.repetitions + 1):
             await _run_nes_repetition(
@@ -3136,6 +3386,14 @@ async def _run_nes_experiment(
                 sink_name=sink_name,
                 query_str=query_str,
             )
+            if restart_after_stop and rep < exp.repetitions:
+                print(
+                    "  nes_restart_after_stop is set - restarting NES coordinator "
+                    f"and workers before repetition {rep + 1}..."
+                )
+                await _stop_nes_cluster()
+                await _start_nes_coordinator()
+                await _start_nes_workers_and_wait_ready()
     finally:
         print("  Stopping containers...")
         await _graceful_stop_tcp(src_conn, [bid_name, auc_name, person_name])
@@ -3266,6 +3524,7 @@ async def run_experiments(
                 await _run_nes_experiment(
                     exp=exp,
                     topology_file=topology_file,
+                    graph=graph,
                     src=src,
                     src_conn=src_conn,
                     src_home=src_home,

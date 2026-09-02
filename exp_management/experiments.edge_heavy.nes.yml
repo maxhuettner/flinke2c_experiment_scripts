@@ -39,37 +39,79 @@ repetitions: 5
 flink_rocksdb: false
 
 experiments:
-  - name: nes_q1_cloud
+  - name: nes_q1_edge_heavy
     system: nes
     query: q1
     placement_method: TOP_DOWN
     nes_num_slots: 2
 
-  - name: nes_q4_cloud
+  - name: nes_q4_edge_heavy
     system: nes
     query: q4
     placement_method: TOP_DOWN
     nes_num_slots: 8
     nes_coordinator_num_slots: 2
 
-  - name: nes_q5_cloud
+  - name: nes_q5_edge_heavy
     system: nes
     query: q5
     placement_method: TOP_DOWN
     nes_num_slots: 10
     nes_coordinator_num_slots: 2
 
-  - name: flink_q1_nes_cloud
+  - name: flink_q1_nes_edge_heavy
     system: flink
     query: q1_nes
     source_schema: nes
 
-  - name: flink_q4_nes_cloud
+  - name: flink_q4_nes_edge_heavy
     system: flink
     query: q4_nes
     source_schema: nes
 
-  - name: flink_q5_nes_cloud
+  - name: flink_q5_nes_edge_heavy
     system: flink
     query: q5_nes
     source_schema: nes
+
+  - name: flinke2c_td_q1_nes_edge_heavy
+    system: flink
+    query: q1_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q1_nes_edge_heavy
+    system: flink
+    query: q1_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_td_q4_nes_edge_heavy
+    system: flink
+    query: q4_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q4_nes_edge_heavy
+    system: flink
+    query: q4_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_td_q5_nes_edge_heavy
+    system: flink
+    query: q5_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q5_nes_edge_heavy
+    system: flink
+    query: q5_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml

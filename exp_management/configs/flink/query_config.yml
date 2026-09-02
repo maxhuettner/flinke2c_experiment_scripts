@@ -1,17 +1,22 @@
+q1:
+  nes_restart_after_stop: true
+
 q3:
   num_task_slots: 2
 
 q4:
   num_task_slots: 3
   bid_src_extra_arg: --num-events 920000
+  nes_restart_after_stop: true
 
 q4_nes:
-  num_task_slots: 3
+  num_task_slots: 4
   bid_src_extra_arg: --num-events 920000
 
 q5:
   num_task_slots: 3
   bid_src_extra_arg: --num-events 920000
+  nes_restart_after_stop: true
 
 q5_nes:
   num_task_slots: 3

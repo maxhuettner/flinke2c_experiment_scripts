@@ -58,15 +58,22 @@ def load_topology(path: str) -> nx.Graph:
             "id", "node_type", "address", "speed", "provision", "location",
             "instance_type", "cloud_instance_type", "ami",
         }
+        location = nd.get("location", "cloud")
+        is_on_prem = str(location).strip().lower().replace("_", "-") in ("onprem", "on-prem")
+        # On-prem nodes are real cluster hardware, not an AWS instance - don't
+        # default them to "t3.micro" or they'll silently be sized (for Flink
+        # memory purposes, see AWS_INSTANCE_MEMORY_MB) as a 1GiB cloud
+        # instance. Fall through to the on-prem fallback size instead.
+        default_instance_type = "on-prem" if is_on_prem else "t3.micro"
         node = TopoNode(
             id=nd["id"],
             node_type=nd.get("node_type", "Compute"),
             address=nd.get("address", ""),
             speed=int(nd["speed"]) if nd.get("speed") is not None else None,
             provision=nd.get("provision", "auto"),
-            location=nd.get("location", "cloud"),
+            location=location,
             # Backward-compatible alias: cloud_instance_type.
-            instance_type=nd.get("instance_type", nd.get("cloud_instance_type", "t3.micro")),
+            instance_type=nd.get("instance_type", nd.get("cloud_instance_type", default_instance_type)),
             ami=nd.get("ami"),
             extra={k: v for k, v in nd.items() if k not in known},
         )
