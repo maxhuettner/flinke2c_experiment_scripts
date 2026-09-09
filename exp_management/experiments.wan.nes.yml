@@ -43,7 +43,6 @@ experiments:
   #   system: nes
   #   query: q1
   #   placement_method: TOP_DOWN
-  #   nes_num_slots: 1
 
   # - name: nes_q4_wan
   #   system: nes
@@ -74,44 +73,90 @@ experiments:
   #   query: q5_nes
   #   source_schema: nes
 
-  - name: flinke2c_td_q1_nes_wan
-    system: flink
-    query: q1_nes
-    source_schema: nes
-    placement_method: TOP_DOWN
-    graphml_file: wan.graphml
+  # - name: flinke2c_td_q1_nes_wan
+  #   system: flink
+  #   query: q1_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   graphml_file: wan.graphml
 
-  - name: flinke2c_bu_q1_nes_wan
-    system: flink
-    query: q1_nes
-    source_schema: nes
-    placement_method: BOTTOM_UP
-    graphml_file: wan.graphml
+  # - name: flinke2c_bu_q1_nes_wan
+  #   system: flink
+  #   query: q1_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: wan.graphml
 
-  - name: flinke2c_td_q4_nes_wan
+  # - name: flinke2c_td_q4_nes_wan
+  #   system: flink
+  #   query: q4_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   graphml_file: wan.graphml
+
+  # - name: flinke2c_bu_q4_nes_wan
+  #   system: flink
+  #   query: q4_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: wan.graphml
+
+  # - name: flinke2c_td_q5_nes_wan
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   graphml_file: wan.graphml
+
+  # - name: flinke2c_bu_q5_nes_wan
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   graphml_file: wan.graphml
+
+  # Experiments for edge-to-cloud topology with NES schema, with explicit task slot counts for q4 and q5.
+
+  - name: flink_q4_nes_8_wan
+    system: flink
+    query: q4_nes
+    num_task_slots: 8
+    source_schema: nes
+
+  - name: flink_q5_nes_10_wan
+    system: flink
+    query: q5_nes
+    num_task_slots: 10
+    source_schema: nes
+
+  - name: flinke2c_td_q4_nes_8_wan
     system: flink
     query: q4_nes
     source_schema: nes
     placement_method: TOP_DOWN
+    num_task_slots: 8
     graphml_file: wan.graphml
 
-  - name: flinke2c_bu_q4_nes_wan
+  - name: flinke2c_bu_q4_nes_8_wan
     system: flink
     query: q4_nes
     source_schema: nes
     placement_method: BOTTOM_UP
+    num_task_slots: 8
     graphml_file: wan.graphml
 
-  - name: flinke2c_td_q5_nes_wan
+  - name: flinke2c_td_q5_nes_10_wan
     system: flink
     query: q5_nes
     source_schema: nes
     placement_method: TOP_DOWN
+    num_task_slots: 10
     graphml_file: wan.graphml
 
-  - name: flinke2c_bu_q5_nes_wan
+  - name: flinke2c_bu_q5_nes_10_wan
     system: flink
     query: q5_nes
     source_schema: nes
     placement_method: BOTTOM_UP
+    num_task_slots: 10
     graphml_file: wan.graphml
