@@ -2163,6 +2163,44 @@ async def _stage_capsys_schedulercfg(
     print(f"  Staged CAPSYS placement: {local_cfg.name} -> {remote_cfg}")
 
 
+# "DETERMINISTIC" is a sim-CLI-level placement_method, not a Flink one: on the
+# wire it's sent to Flink as "CAPSYS" (see _flink_wire_placement_method) so
+# the custom flinke2c scheduler reads cluster.capsys.scheduler-cfg.path same
+# as real CAPSYS does. The only difference is which local schedulercfg file
+# gets staged - a single reproducible one from capsys/deterministic/ (see
+# capsys/generate_deterministic_placement.py) instead of a DFS-searched,
+# per-repetition one from capsys/.
+DETERMINISTIC_SCHEDULERCFG_DIR = CAPSYS_DIR / "deterministic"
+
+
+def _flink_wire_placement_method(placement_method: str) -> str:
+    return "CAPSYS" if placement_method.strip().upper() == "DETERMINISTIC" else placement_method
+
+
+def _deterministic_schedulercfg_path(query: str, topology_name: str) -> Path:
+    return DETERMINISTIC_SCHEDULERCFG_DIR / f"schedulercfg_{query}_{topology_name}"
+
+
+async def _stage_deterministic_schedulercfg(
+    *,
+    snk_conn: asyncssh.SSHClientConnection,
+    snk_home: str,
+    query: str,
+    topology_name: str,
+) -> None:
+    local_cfg = _deterministic_schedulercfg_path(query, topology_name)
+    if not local_cfg.exists():
+        raise FileNotFoundError(
+            f"Deterministic schedulercfg not found: {local_cfg}. Generate it with "
+            f"'python3 capsys/generate_deterministic_placement.py --topology {topology_name} "
+            f"--queries {query}' first."
+        )
+
+    remote_cfg = f"{snk_home}/flinke2c-conf/schedulercfg"
+    await _upload_local_text_file(snk_conn, local_cfg, remote_cfg)
+    print(f"  Staged deterministic placement: {local_cfg.name} -> {remote_cfg}")
+
+
 @asynccontextmanager
 async def _forward_local_port(
     conn: asyncssh.SSHClientConnection,
@@ -2219,13 +2257,21 @@ async def _run_flink_repetition(
         for j in lib_jars
     )
 
-    if exp.placement_method.strip().upper() == "CAPSYS":
+    placement = exp.placement_method.strip().upper()
+    if placement == "CAPSYS":
         await _stage_capsys_schedulercfg(
             snk_conn=snk_conn,
             snk_home=snk_home,
             query=exp.query,
             topology_name=topology_name,
             rep_index=rep - 1,
+        )
+    elif placement == "DETERMINISTIC":
+        await _stage_deterministic_schedulercfg(
+            snk_conn=snk_conn,
+            snk_home=snk_home,
+            query=exp.query,
+            topology_name=topology_name,
         )
 
     # ── Submit SQL query ───────────────────────────────────────────────────
@@ -2365,7 +2411,8 @@ async def _run_flink_experiment(
     graphml_path    = f"/conf/{graphml_filename}" if graphml_filename else ""
     use_rocksdb     = exp.flink_rocksdb if exp.flink_rocksdb is not None else True
     coordinator_cfg = _coordinator_config(
-        snk.address, exp.placement_method, graphml_path, snk.instance_type, use_rocksdb
+        snk.address, _flink_wire_placement_method(exp.placement_method),
+        graphml_path, snk.instance_type, use_rocksdb
     )
     worker_cfgs     = {
         wn.id: _worker_config(snk.address, wn.address, task_slots, wn.instance_type)

@@ -44,12 +44,12 @@ experiments:
   #   query: q1
   #   placement_method: TOP_DOWN
 
-  # - name: nes_q4_wan
-  #   system: nes
-  #   query: q4
-  #   placement_method: TOP_DOWN
-  #   nes_num_slots: 8
-  #   nes_coordinator_num_slots: 2
+  - name: nes_q4_wan
+    system: nes
+    query: q4
+    placement_method: TOP_DOWN
+    nes_num_slots: 8
+    nes_coordinator_num_slots: 2
 
   # - name: nes_q5_wan
   #   system: nes
@@ -123,11 +123,11 @@ experiments:
     num_task_slots: 8
     source_schema: nes
 
-  - name: flink_q5_nes_10_wan
-    system: flink
-    query: q5_nes
-    num_task_slots: 10
-    source_schema: nes
+  # - name: flink_q5_nes_10_wan
+  #   system: flink
+  #   query: q5_nes
+  #   num_task_slots: 10
+  #   source_schema: nes
 
   - name: flinke2c_td_q4_nes_8_wan
     system: flink
@@ -145,18 +145,18 @@ experiments:
     num_task_slots: 8
     graphml_file: wan.graphml
 
-  - name: flinke2c_td_q5_nes_10_wan
-    system: flink
-    query: q5_nes
-    source_schema: nes
-    placement_method: TOP_DOWN
-    num_task_slots: 10
-    graphml_file: wan.graphml
+  # - name: flinke2c_td_q5_nes_10_wan
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   num_task_slots: 10
+  #   graphml_file: wan.graphml
 
-  - name: flinke2c_bu_q5_nes_10_wan
-    system: flink
-    query: q5_nes
-    source_schema: nes
-    placement_method: BOTTOM_UP
-    num_task_slots: 10
-    graphml_file: wan.graphml
+  # - name: flinke2c_bu_q5_nes_10_wan
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   num_task_slots: 10
+  #   graphml_file: wan.graphml

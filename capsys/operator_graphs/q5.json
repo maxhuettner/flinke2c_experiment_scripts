@@ -1,0 +1,20 @@
+{
+  "query": "q5",
+  "source": "recovered-from:capsys/deterministic/schedulercfg_q5_edge-to-cloud",
+  "operators": [
+    "Sink: nexmark_q5[19]",
+    "Calc[18]",
+    "WindowJoin[17]",
+    "GlobalWindowAggregate[6]",
+    "LocalWindowAggregate[4]",
+    "Calc[3]",
+    "GlobalWindowAggregate[15]",
+    "LocalWindowAggregate[13]",
+    "Calc[12]",
+    "GlobalWindowAggregate[11]",
+    "LocalWindowAggregate[9]",
+    "Calc[8]",
+    "WatermarkAssigner[2]",
+    "Source: bids[1]"
+  ]
+}

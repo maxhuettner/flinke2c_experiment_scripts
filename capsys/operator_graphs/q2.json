@@ -1,0 +1,10 @@
+{
+  "query": "q2",
+  "source": "reference-schedulercfg:edge-to-cloud",
+  "operators": [
+    "Sink: nexmark_q2[4]",
+    "Calc[3]",
+    "Source: bids[1]",
+    "WatermarkAssigner[2]"
+  ]
+}

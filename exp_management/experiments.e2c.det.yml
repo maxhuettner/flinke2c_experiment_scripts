@@ -1,0 +1,213 @@
+# Example experiment batch definition for `sim experiment`.
+#
+# Usage:
+#   sim experiment \
+#     -f config/topologies/edge-to-cloud.json \
+#     -e exp_management/experiments.e2c.det.yml \
+#     -o results/
+#
+# Combines the baseline flink, flinke2c (TOP_DOWN/BOTTOM_UP graphml), CAPSYS
+# and DETERMINISTIC placement variants for edge-to-cloud in one file -
+# merges experiments.e2c.yml (minus its nes entries) and
+# experiments.e2c.capsys.yml, plus the DETERMINISTIC entries below. Grouped
+# by query, each query's entries ordered flink -> det -> flinke2c -> capsys.
+#
+# placement_method: DETERMINISTIC reuses the CAPSYS mechanism (Flink still
+# gets "cluster.placement-method: CAPSYS" on the wire - see
+# _flink_wire_placement_method in cli/experiment.py) but stages a fixed,
+# reproducible schedulercfg from capsys/deterministic/ instead of a
+# DFS-searched, per-repetition one. Same operator always lands on the same
+# node, every repetition, every run.
+#
+# Generate/refresh those files with:
+#   python3 capsys/generate_deterministic_placement.py \
+#     --topology edge-to-cloud --queries q1 q2 q3 q4 q5 q7 q8
+#
+# See capsys/generate_deterministic_placement.py's module docstring for the
+# assignment algorithm, the capsys/operator_graphs/ cache, and how to do
+# this for a topology with no profiled CAPSYS data at all (e.g. wan) or a
+# query CAPSYS's DFS can never plan for (q5/q7 - multiple downstream
+# operators).
+
+repetitions: 10
+
+experiments:
+  # ── q1 ──────────────────────────────────────────────────────────────────
+  # - name: flink_q1_e2c
+  #   system: flink
+  #   query: q1
+
+  # - name: flink_det_q1_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q1
+
+  - name: flinke2c_td_q1_e2c
+    system: flink
+    query: q1
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q1_e2c
+    system: flink
+    query: q1
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # - name: capsys_q1_e2c
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q1
+
+  # ── q2 ──────────────────────────────────────────────────────────────────
+  # - name: flink_q2_e2c
+  #   system: flink
+  #   query: q2
+
+  # - name: flink_det_q2_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q2
+
+  - name: flinke2c_td_q2_e2c
+    system: flink
+    query: q2
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q2_e2c
+    system: flink
+    query: q2
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # - name: capsys_q2_e2c
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q2
+
+  # ── q3 ──────────────────────────────────────────────────────────────────
+  # - name: flink_q3_e2c
+  #   system: flink
+  #   query: q3
+
+  # - name: flink_det_q3_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q3
+
+  - name: flinke2c_td_q3_e2c
+    system: flink
+    query: q3
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q3_e2c
+    system: flink
+    query: q3
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # - name: capsys_q3_e2c
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q3
+
+  # ── q4 ──────────────────────────────────────────────────────────────────
+  # - name: flink_q4_e2c
+  #   system: flink
+  #   query: q4
+
+  # - name: flink_det_q4_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q4
+
+  - name: flinke2c_td_q4_e2c
+    system: flink
+    query: q4
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q4_e2c
+    system: flink
+    query: q4
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # - name: capsys_q4_e2c
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q4
+
+  # ── q5 (no capsys entry - CAPSYS's DFS can't plan q5: multiple downstream
+  # operators, see dfs.py) ───────────────────────────────────────────────
+  # - name: flink_q5_e2c
+  #   system: flink
+  #   query: q5
+
+  # - name: flink_det_q5_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q5
+
+  - name: flinke2c_td_q5_e2c
+    system: flink
+    query: q5
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q5_e2c
+    system: flink
+    query: q5
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # ── q7 (no capsys entry - same reason as q5) ──────────────────────────
+  # - name: flink_q7_e2c
+  #   system: flink
+  #   query: q7
+
+  # - name: flink_det_q7_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q7
+
+  - name: flinke2c_td_q7_e2c
+    system: flink
+    query: q7
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q7_e2c
+    system: flink
+    query: q7
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # ── q8 ──────────────────────────────────────────────────────────────────
+  # - name: flink_q8_e2c
+  #   system: flink
+  #   query: q8
+
+  # - name: flink_det_q8_e2c
+  #   system: flink
+  #   placement_method: DETERMINISTIC
+  #   query: q8
+
+  - name: flinke2c_td_q8_e2c
+    system: flink
+    query: q8
+    placement_method: TOP_DOWN
+    graphml_file: edge-to-cloud.graphml
+
+  - name: flinke2c_bu_q8_e2c
+    system: flink
+    query: q8
+    placement_method: BOTTOM_UP
+    graphml_file: edge-to-cloud.graphml
+
+  # - name: capsys_q8_e2c
+  #   system: flink
+  #   placement_method: CAPSYS
+  #   query: q8
