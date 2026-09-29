@@ -60,10 +60,8 @@ def load_topology(path: str) -> nx.Graph:
         }
         location = nd.get("location", "cloud")
         is_on_prem = str(location).strip().lower().replace("_", "-") in ("onprem", "on-prem")
-        # On-prem nodes are real cluster hardware, not an AWS instance - don't
-        # default them to "t3.micro" or they'll silently be sized (for Flink
-        # memory purposes, see AWS_INSTANCE_MEMORY_MB) as a 1GiB cloud
-        # instance. Fall through to the on-prem fallback size instead.
+        # Real hardware, not an AWS instance -- don't size it as a 1GiB cloud
+        # default (see AWS_INSTANCE_MEMORY_MB).
         default_instance_type = "on-prem" if is_on_prem else "t3.micro"
         node = TopoNode(
             id=nd["id"],
@@ -92,11 +90,7 @@ def load_topology(path: str) -> nx.Graph:
 
 
 def _add_implicit_all_to_all_edges(graph: nx.Graph) -> None:
-    """Expand same-location ``network_type=all-to-all`` groups into edges.
-
-    This keeps the JSON concise for flat cloud regions while still giving the
-    routing and provisioning code an explicit graph to work with.
-    """
+    """Expand same-location ``network_type=all-to-all`` groups into edges."""
     groups: dict[str, list[str]] = {}
 
     for node_id in graph.nodes():

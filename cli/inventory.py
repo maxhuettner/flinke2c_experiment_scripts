@@ -79,12 +79,8 @@ def _build_wireguard_graph(
     graph: nx.Graph,
     default_cloud_region: str,
 ) -> nx.Graph:
-    """Return the graph edges that require WireGuard.
-
-    Same-region cloud nodes only bypass WireGuard when both endpoints are part
-    of an explicit ``network_type=all-to-all`` mesh. All other graph edges get
-    WireGuard tunnels so that the overlay matches the topology.
-    """
+    """Return the graph edges that require WireGuard (all but same-region
+    ``network_type=all-to-all`` cloud pairs, which use native VPC routing)."""
     wg_graph: nx.Graph = nx.Graph()
     wg_graph.add_nodes_from(graph.nodes(data=True))
 
@@ -108,8 +104,7 @@ def _assign_interface_addresses(
     }
 
 
-# Internal keys written by earlier tool versions; strip them from the output.
-# Keep wireguard_endpoint so WireGuard peer endpoint derivation can use it.
+# Written by earlier tool versions; drop from output.
 _ONPREM_STRIP_KEYS = {"topology_node_id"}
 
 
@@ -117,15 +112,9 @@ def _build_onprem_hosts(
     graph: nx.Graph,
     onprem_file_vars: dict,
 ) -> tuple[dict, dict[str, str]]:
-    """Build on-prem host entries and hostname→topo-node-id map from the graph.
-
-    The topology's ``on-prem-id`` field is the authoritative source of which
-    physical hosts participate and how they map to logical topology nodes.
-    Supplementary vars from *onprem_file_vars* (e.g. ansible_user) are merged
-    in, but internal-only keys are stripped.  When two topology nodes share an
-    on-prem-id (same machine acting as multiple logical nodes) the first one in
-    document order wins — typically the node with cross-location WireGuard edges.
-    """
+    """Build on-prem host entries and a hostname->topo-node-id map, keyed by
+    the topology's ``on-prem-id``. If two nodes share one (same machine, two
+    logical roles), the first in document order wins."""
     onprem_id_to_topo: dict[str, str] = {}
     onprem_hosts: dict = {}
 
@@ -142,8 +131,6 @@ def _build_onprem_hosts(
                 k: v for k, v in (onprem_file_vars.get(hostname) or {}).items()
                 if k not in _ONPREM_STRIP_KEYS
             }
-            # Topology values are authoritative defaults; inventory file vars
-            # can override them when present.
             file_vars.setdefault("ansible_host", topo_node.address)
             file_vars.setdefault("wireguard_endpoint", topo_node.address)
             file_vars.setdefault("ansible_user", "ubuntu")
@@ -165,15 +152,10 @@ def _build_wg_configs(
 ) -> dict:
     """Compute per-node WireGuard ECMP config for all nodes in the overlay.
 
-    Same-region cloud<->cloud edges are excluded only when both endpoints use
-    ``network_type=all-to-all``. Cross-region cloud edges, explicit same-region
-    cloud edges, cloud<->on-prem edges, and on-prem<->on-prem edges get
-    WireGuard tunnels. On-prem nodes use their topology ``address`` as the LAN
-    endpoint; an explicit ``ansible_host`` in onprem_hosts overrides that if set.
+    On-prem nodes use their topology ``address`` as the LAN endpoint unless
+    ``ansible_host`` is set in onprem_hosts.
     """
-    # On-prem-only topology: no cloud nodes are present/provisioned, so skip
-    # WireGuard entirely and use native cluster networking.
-    if not cloud_host_ips:
+    if not cloud_host_ips:  # on-prem-only topology: no WireGuard needed
         return {}
 
     onprem_host_ips: dict[str, str] = {}
@@ -203,9 +185,7 @@ def _build_wg_configs(
                 "(expected in Terraform output), skipping WireGuard edges for this node"
             )
 
-    # route_address_map covers ALL topology nodes so that cloud-only nodes
-    # (e.g. snk with no WireGuard interfaces) appear in AllowedIPs when
-    # on-prem nodes can reach them transitively through a cloud gateway.
+    # Covers all nodes so WG-less ones (e.g. snk) can appear in AllowedIPs.
     route_address_map = {nid: graph.nodes[nid]["data"].address for nid in graph.nodes()}
     cloud_wg_nodes = [nid for nid in wg_node_ids if nid in cloud_host_ips]
     interface_address_map = _assign_interface_addresses(cloud_wg_nodes)
@@ -215,8 +195,6 @@ def _build_wg_configs(
 
     on_prem_nodes = {nid for nid in wg_node_ids if _is_on_prem_node(graph, nid)}
 
-    # On-prem nodes are reachable at their topology address on the local LAN.
-    # ansible_host (from onprem_hosts) overrides this if a different IP is set.
     onprem_lan_ips = {nid: graph.nodes[nid]["data"].address for nid in on_prem_nodes}
     host_public_ips = {**cloud_host_ips, **onprem_lan_ips, **onprem_host_ips}
 
@@ -362,17 +340,9 @@ def write_inventory(
 ) -> None:
     """Write the generated Ansible inventory to *output_path*.
 
-    Cloud hosts are sourced from *instance_map* (keyed by node id, values
-    contain ``public_ip`` / ``private_ip`` as returned by ``terraform output
-    -json``).  On-prem hosts are derived from the topology's ``on-prem-id``
-    fields — every on-prem node that carries one gets an inventory entry
-    automatically.  *onprem_path* is optional and provides supplementary vars
-    (ansible_user, …) that are merged in for matching hosts.
-
-    Same-region cloud<->cloud edges rely on native VPC routing only for
-    ``network_type=all-to-all`` meshes. Explicit cloud edges outside that mesh,
-    cross-region cloud edges, and any edge touching on-prem create WireGuard
-    interfaces.
+    Cloud hosts come from *instance_map* (terraform output IPs). On-prem hosts
+    are derived from the topology's ``on-prem-id`` fields, merged with
+    supplementary vars from the optional *onprem_path* file.
     """
     onprem_file_vars = _load_onprem(onprem_path)
     onprem_hosts, onprem_id_to_topo = _build_onprem_hosts(graph, onprem_file_vars)

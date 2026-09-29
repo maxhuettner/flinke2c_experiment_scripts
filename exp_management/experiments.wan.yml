@@ -156,4 +156,3 @@ experiments:
     query: q8
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
-

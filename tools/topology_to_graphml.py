@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
 """Convert network-sim topology JSON files to Flink GraphML files.
 
-Reads a topology JSON (or every *.json in a directory) and writes a
-topology.graphml-compatible file to exp_management/configs/flink/coordinator/.
-The output filename matches the topology stem, e.g.:
-    config/topologies/cloud.json -> exp_management/configs/flink/coordinator/cloud.graphml
-
-The generated file is used by the flinke2c scheduler when placement_method is
-set (e.g. TOP_DOWN). It encodes node types and overlay IP addresses so Flink
-can map operators to the physical network topology.
+Reads a topology JSON (or every *.json in a directory) and writes
+exp_management/configs/flink/coordinator/<stem>.graphml, consumed by the
+flinke2c scheduler for topology-aware operator placement.
 
 Usage:
-    # Single file
     python3 tools/topology_to_graphml.py config/topologies/cloud.json
-
-    # All topologies in a directory
-    python3 tools/topology_to_graphml.py config/topologies/
-
-    # Override task slots per compute node (default: 1)
-    python3 tools/topology_to_graphml.py config/topologies/cloud.json --slots 3
-
-    # Custom output directory
-    python3 tools/topology_to_graphml.py config/topologies/ --output-dir /tmp/graphml/
+    python3 tools/topology_to_graphml.py config/topologies/ --slots 3 --output-dir /tmp/graphml/
 """
 
 import argparse

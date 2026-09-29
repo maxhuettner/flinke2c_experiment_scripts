@@ -301,12 +301,8 @@ def setup(topology_file: str) -> None:
 @main.command("gen-inventory")
 @click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
 def gen_inventory(topology_file: str) -> None:
-    """Regenerate the Ansible inventory from the topology and current Terraform outputs.
-
-    Use this after changing the topology file or onprem.yml without needing to
-    re-provision cloud infrastructure.  Requires Terraform state to be present
-    (i.e. 'setup' must have been run at least once).
-    """
+    """Regenerate the Ansible inventory after changing the topology or onprem.yml,
+    without re-provisioning. Requires Terraform state ('setup' run at least once)."""
     graph = load_topology(topology_file)
     default_region = os.environ.get("AWS_REGION", "eu-central-1")
     try:
@@ -490,6 +486,174 @@ def run_cmd(topology_file: str, command: str, nodes: tuple[str, ...]) -> None:
         sys.exit(1)
 
 
+@main.command("discover-edges")
+@click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
+@click.option(
+    "--apply", is_flag=True,
+    help="Write discovered edges into the topology file (preserves existing 'speed' values)",
+)
+@click.option(
+    "--direct", is_flag=True,
+    help="Report only single-hop edges (TTL=1 ping), not full reachability",
+)
+@click.option(
+    "--probe-port", default=22, show_default=True,
+    help="TCP port to probe (ignored with --direct)",
+)
+@click.option(
+    "--timeout", default=3, show_default=True,
+    help="Per-probe timeout in seconds",
+)
+def discover_edges_cmd(topology_file: str, apply: bool, direct: bool, probe_port: int, timeout: int) -> None:
+    """Probe real connectivity between provisioned nodes and derive topology edges.
+
+    Without --direct: raw reachability, typically a full mesh on this infra.
+    With --direct: single-hop neighbors only, via TTL=1 ping hop-counting.
+    See TopologyDiscovery.md.
+    """
+    from cli.discover import discover_direct_edges, discover_edges
+
+    if not ANSIBLE_INVENTORY.exists():
+        print(
+            f"Inventory not found at {ANSIBLE_INVENTORY}. Run 'setup' first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    with open(ANSIBLE_INVENTORY) as f:
+        inv = yaml.safe_load(f) or {}
+
+    all_hosts: dict = {}
+    children = inv.get("all", {}).get("children", {})
+    for group in children.values():
+        all_hosts.update(group.get("hosts", {}))
+
+    default_ssh_user = os.environ.get("SSH_USER", "ubuntu")
+    ssh_key = _load_ssh_key_path()
+    ssh_passphrase = os.environ.get("SSH_KEY_PASSPHRASE")
+    if not ssh_key:
+        raise click.ClickException("No SSH key found. Set SSH_KEY_PATH in .env or environment.")
+
+    with open(topology_file) as f:
+        topo = json.load(f)
+
+    # On-prem hosts are keyed by real hostname ("on-prem-id"), not node id.
+    topo_nodes = {nd["id"]: nd for nd in topo.get("nodes", [])}
+    hosts: dict[str, dict] = {}
+    for node_id, node_data in topo_nodes.items():
+        inv_key = node_data.get("on-prem-id") or node_id
+        vars_ = all_hosts.get(inv_key)
+        if not vars_:
+            continue
+        ip = vars_.get("ansible_host")
+        if not ip:
+            continue
+        hosts[node_id] = {"host": ip, "user": vars_.get("ansible_user", default_ssh_user)}
+
+    if not hosts:
+        raise click.ClickException("No hosts in the inventory match this topology's node ids.")
+
+    if direct:
+        addresses = {
+            nd["id"]: nd["address"] for nd in topo.get("nodes", [])
+            if nd.get("address")
+        }
+        print(f"Probing direct (single-hop) links from {len(hosts)} node(s)...")
+        edges = asyncio.run(
+            discover_direct_edges(
+                hosts,
+                addresses,
+                key_path=ssh_key,
+                passphrase=ssh_passphrase,
+                timeout=timeout,
+            )
+        )
+    else:
+        print(f"Probing connectivity from {len(hosts)} node(s)...")
+        edges = asyncio.run(
+            discover_edges(
+                hosts,
+                key_path=ssh_key,
+                passphrase=ssh_passphrase,
+                probe_port=probe_port,
+                timeout=timeout,
+            )
+        )
+
+    print(f"\nDiscovered {len(edges)} edge(s):")
+    for u, v in edges:
+        print(f"  {u} -- {v}")
+
+    undeployed = set(topo_nodes) - set(hosts)
+    if undeployed:
+        print(
+            f"\nWarning: {len(undeployed)} node(s) from {topology_file} are not in the "
+            f"currently deployed inventory, so they were NOT probed: {', '.join(sorted(undeployed))}"
+        )
+        print(
+            "  (their edges below are left untouched either way -- run 'sim setup' "
+            "with this exact topology file first to test them)"
+        )
+
+    # Diff against the expanded graph, not raw JSON, so implicit
+    # all-to-all edges aren't reported as new ones.
+    existing_graph = load_topology(topology_file)
+    existing_speed = {
+        tuple(sorted((u, v))): attrs.get("speed")
+        for u, v, attrs in existing_graph.edges(data=True)
+    }
+
+    # Edges touching an undeployed node are never exercised.
+    testable_pairs = {
+        pair for pair in existing_speed
+        if pair[0] not in undeployed and pair[1] not in undeployed
+    }
+    untested_pairs = set(existing_speed) - testable_pairs
+    discovered_pairs = set(edges)
+
+    added = discovered_pairs - testable_pairs
+    removed = testable_pairs - discovered_pairs
+    if added:
+        print(f"\nNew edges not in {topology_file}:")
+        for u, v in sorted(added):
+            print(f"  + {u} -- {v}")
+    if removed:
+        print(f"\nEdges in {topology_file} that were tested and are NOT actually reachable:")
+        for u, v in sorted(removed):
+            print(f"  - {u} -- {v}")
+    if untested_pairs:
+        print(f"\nEdges in {topology_file} left untested (endpoint not currently deployed):")
+        for u, v in sorted(untested_pairs):
+            print(f"  ? {u} -- {v}")
+
+    if not apply:
+        print("\n(dry run -- pass --apply to write these edges into the topology file)")
+        return
+
+    if undeployed:
+        raise click.ClickException(
+            "Refusing to --apply: some topology nodes were never probed (see warning "
+            "above), so overwriting 'edges' would silently drop untested links. Deploy "
+            "this exact topology with 'sim setup' first, or edit the file by hand using "
+            "the discovered/untested lists above."
+        )
+
+    new_edges = []
+    for u, v in edges:
+        edge = {"source": u, "target": v}
+        speed = existing_speed.get((u, v))
+        if speed is not None:
+            edge["speed"] = speed
+        new_edges.append(edge)
+
+    topo["edges"] = new_edges
+    with open(topology_file, "w") as f:
+        json.dump(topo, f, indent=2)
+        f.write("\n")
+    print(f"\nWrote {len(new_edges)} edge(s) to {topology_file}")
+    print("Run tools/topology_to_graphml.py to regenerate the .graphml file.")
+
+
 @main.command("experiment")
 @click.option("-f", "--topology-file", required=True, help="Path to topology JSON")
 @click.option(
@@ -526,14 +690,10 @@ def experiment_cmd(
 ) -> None:
     """Run a batch of streaming experiments on the provisioned nodes.
 
-    Reads the experiment list from EXPERIMENTS_FILE and for each experiment:
-    starts TCP sources + sink and a Flink cluster on the topology's source node,
-    runs the SQL query for the requested number of repetitions, then downloads
-    the logs to OUTPUT_DIR/<experiment-name>/.
-
-    Source data files in exp_management/source_data/ are uploaded to the remote
-    ~/data/ directory before the first experiment (pass --skip-data-upload if
-    they are already present).
+    For each experiment in EXPERIMENTS_FILE: starts sources/sink and a Flink
+    cluster, runs the query for the given repetitions, downloads logs to
+    OUTPUT_DIR/<experiment-name>/. Uploads source data on the first run
+    unless --skip-data-upload.
     """
     from cli.experiment import load_experiments, run_experiments
 

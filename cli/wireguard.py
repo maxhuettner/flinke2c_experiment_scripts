@@ -1,29 +1,12 @@
 """Compute per-node WireGuard configuration from a topology graph.
 
-Routing strategy
-----------------
-WireGuard's AllowedIPs acts as a per-peer routing table entry.  For a packet
-on node A destined for node E, we need A to send it to whichever direct
-neighbour lies on the shortest path to E.  That neighbour then forwards it on,
-and so on, until it reaches E.
+Multi-hop forwarding needs, per intermediate node: IP forwarding enabled and
+FORWARD iptables rules (both handled by Ansible), plus AllowedIPs entries for
+every destination whose shortest path starts with that peer's tunnel, not
+just the peer's own address. This module computes that third part.
 
-For this forwarding chain to work every intermediate node must:
-
-  1. Have IP-forwarding enabled  (net.ipv4.ip_forward = 1, set by Ansible).
-  2. Have iptables FORWARD rules that permit traffic in/out of wg0 (set via
-     PostUp/PreDown in the WireGuard config template).
-  3. Have AllowedIPs entries for every destination whose shortest path begins
-     with the direct tunnel to that peer — not just the peer's own WireGuard
-     IP.
-
-This module covers point 3.  Points 1 and 2 are handled in the Ansible role.
-
-Key generation
---------------
-Keypairs are derived deterministically from (salt || node_id) via SHA-256 so
-that re-running the tool produces the same keys (no drift in deployed configs).
-The algorithm is byte-compatible with the previous Rust x25519-dalek
-implementation:  SHA-256(salt_bytes || node_id_bytes) → raw scalar → X25519.
+Keypairs are derived deterministically from SHA-256(salt || node_id), so
+reruns don't drift, byte-compatible with the prior Rust x25519-dalek impl.
 """
 
 import base64
@@ -102,16 +85,11 @@ def _compute_all_nexthops(
     participants: list[str],
     routing_graph: Optional[nx.Graph] = None,
 ) -> dict[str, dict[str, list[str]]]:
-    """Return {source: {destination: [nexthop, ...]}} with all ECMP next-hops.
+    """Return {source: {destination: [nexthop, ...]}}, all equal-cost next-hops (for ECMP).
 
-    Uses nx.all_shortest_paths so that destinations with multiple equal-cost
-    paths contribute multiple next-hops, enabling kernel ECMP routes.
-
-    If *routing_graph* is provided it is used for path finding (so cloud-only
-    nodes reachable via VPC appear as destinations), while *graph* is still
-    used to determine which neighbours have direct WireGuard interfaces.  The
-    first hop of every path is restricted to direct WireGuard neighbours so
-    that AllowedIPs only references interfaces that actually exist.
+    *routing_graph*, if given, is used for path-finding (so cloud-only nodes
+    reachable via VPC appear as destinations); *graph* still determines valid
+    first hops, restricted to direct WireGuard neighbours.
     """
     sub = graph.subgraph(participants)
     rg = routing_graph if routing_graph is not None else sub
@@ -148,22 +126,12 @@ def build_wireguard_config(
     network_base: str = DEFAULT_NETWORK_BASE,
     prefix: int = DEFAULT_PREFIX,
 ) -> dict[str, dict]:
-    """Return a per-node WireGuard config dict keyed by node id.
+    """Return a per-node WireGuard config dict, keyed by node id, for the Ansible ``wireguard:`` var.
 
-    *host_public_ips* maps node_id → public IP string.  Only nodes present
-    in that dict participate in the overlay; others are silently skipped (so
-    on-prem nodes with manually managed WireGuard configs are not touched).
-
-    Each value is a dict suitable for embedding under the ``wireguard:`` key
-    of an Ansible inventory host entry.
-
-    AllowedIPs explained
-    --------------------
-    For peer P on source node S, AllowedIPs contains the WireGuard address of
-    every destination D where the BFS shortest path from S to D begins with
-    the hop S→P.  This lets the kernel route traffic for non-adjacent nodes
-    through the correct tunnel, enabling multi-hop forwarding without a full
-    mesh of direct WireGuard sessions.
+    Only nodes present in *host_public_ips* participate (others, e.g. on-prem
+    nodes with manually managed configs, are skipped). For peer P on node S,
+    AllowedIPs covers every destination whose shortest path from S starts
+    with S→P, enabling multi-hop forwarding without a full tunnel mesh.
     """
     participants = sorted(
         nid for nid in (node_ids or list(graph.nodes())) if nid in host_public_ips
@@ -177,8 +145,7 @@ def build_wireguard_config(
     for src in participants:
         routes = next_hop_tables.get(src, {})
 
-        # Group every reachable destination by its next-hop peer.
-        # AllowedIPs for peer X = WireGuard address of every D where next_hop == X.
+        # AllowedIPs for peer X = address of every destination routed via X.
         allowed_by_peer: dict[str, list[str]] = {}
         for dest, next_hop in routes.items():
             wg_ip = address_map[dest].split("/")[0]
@@ -215,12 +182,8 @@ def _build_route_map(
     graph: nx.Graph,
     route_address_map: Optional[dict[str, str]],
 ) -> dict[str, str]:
-    """Build IP map for *nodes*, using *route_address_map* when provided.
-
-    *nodes* may include cloud-only nodes (e.g. a sink with no WireGuard
-    interfaces) so their addresses appear in AllowedIPs for on-prem peers
-    that can reach them transitively via VPC through a cloud neighbour.
-    """
+    """Build IP map for *nodes* (may include WG-less cloud nodes, e.g. a sink,
+    so their addresses can still appear in AllowedIPs via a cloud gateway)."""
     if route_address_map is None:
         return {nid: f"{graph.nodes[nid]['data'].address}/32" for nid in nodes if nid in graph}
     return {
@@ -250,12 +213,8 @@ def _peer_endpoint(
     host_public_ips: dict[str, str],
     on_prem_nodes: Optional[set[str]],
 ) -> Optional[str]:
-    """Return the WireGuard endpoint for *nbr* as seen from *src*, or None.
-
-    Cloud → on-prem: None (cloud cannot reach on-prem behind NAT; on-prem
-    initiates and the cloud side learns the endpoint from the first handshake).
-    All other combinations (on-prem→cloud, on-prem→on-prem) get an endpoint.
-    """
+    """Return the WireGuard endpoint for *nbr* as seen from *src*, or None for
+    cloud→on-prem (on-prem sits behind NAT; cloud learns it from the handshake)."""
     src_is_cloud = on_prem_nodes is None or src not in on_prem_nodes
     nbr_is_on_prem = on_prem_nodes is not None and nbr in on_prem_nodes
     if src_is_cloud and nbr_is_on_prem:
@@ -270,13 +229,8 @@ def _peer_allowed_ips(
     route_map: dict[str, str],
     nbr_iface_ip: Optional[str] = None,
 ) -> list[str]:
-    """AllowedIPs: neighbor's own IPs + every destination where nbr is a nexthop.
-
-    *nbr_iface_ip* is the WireGuard interface address of the neighbor (may
-    differ from its topology/routing address on cloud nodes).  Including it
-    ensures packets sourced from that interface address are accepted when the
-    neighbor initiates traffic.
-    """
+    """AllowedIPs: neighbor's own IPs (route + interface address, which can
+    differ on cloud nodes) plus every destination routed through it."""
     allowed: set[str] = {nbr_route_ip}
     if nbr_iface_ip and nbr_iface_ip != nbr_route_ip:
         allowed.add(nbr_iface_ip)
@@ -330,34 +284,16 @@ def build_wireguard_ecmp_config(
     on_prem_nodes: Optional[set[str]] = None,
     routing_graph: Optional[nx.Graph] = None,
 ) -> dict[str, dict]:
-    """Return per-node ECMP WireGuard config with one interface per direct neighbor.
+    """Return per-node ECMP WireGuard config: one ``wg_{neighbor}`` interface per
+    direct graph-neighbor, each with a ``wireguard_interfaces`` entry and a
+    ``wireguard_ecmp_routes`` list of ``ip route replace ... nexthop ...``
+    commands for destinations with more than one equal-cost next-hop.
 
-    Each node gets a dict with:
-      wireguard_interfaces  – list of per-neighbor wg interface configs
-      wireguard_ecmp_routes – list of ``ip route replace … nexthop …`` commands
-
-    One WireGuard interface is created per direct graph-neighbor (named
-    ``wg_{neighbor}``).  AllowedIPs on each interface covers all destinations
-    reachable via that neighbor.  Exclusively-via-one-interface destinations get
-    a direct ``ip route replace`` in PostUp; destinations with multiple equal-cost
-    next-hops get a multi-nexthop ECMP route installed by a separate service.
-
-    *routing_graph* may be the full topology graph (including cloud-only edges
-    that are not in *graph*).  When provided, nexthop computation considers
-    paths through those extra edges so that cloud-only nodes (e.g. a sink with
-    no WireGuard interfaces) still appear in AllowedIPs for on-prem peers that
-    can reach them transitively via a cloud gateway node over the VPC.
-
-    Port assignment
-    ---------------
-    Each undirected edge in the graph gets a unique UDP port starting at
-    ``listen_port``.  Edges are sorted by ``(min(u,v), max(u,v))`` for a stable
-    assignment, so both endpoints of an edge use the same port.
-
-    Key generation
-    --------------
-    Each edge-endpoint gets its own keypair derived from
-    ``edge_{min}_{max}_{node}`` so that per-interface keys are independent.
+    *routing_graph*, if given (e.g. the full topology including cloud-only
+    edges), extends nexthop computation so WG-less nodes like a sink still
+    appear in AllowedIPs via a cloud gateway. Ports are assigned per edge,
+    stable-sorted by (min(u,v), max(u,v)) so both ends agree; each edge
+    endpoint gets its own keypair from ``edge_{min}_{max}_{node}``.
     """
     participants = sorted(
         nid for nid in (node_ids or list(graph.nodes()))
@@ -365,8 +301,7 @@ def build_wireguard_ecmp_config(
     )
     sub = graph.subgraph(participants)
 
-    # route_map covers WG participants *and* any routing-graph-only nodes so
-    # that cloud-only destinations (e.g. snk) appear in AllowedIPs.
+    # Also covers routing-graph-only nodes so e.g. snk appears in AllowedIPs.
     rg = routing_graph if routing_graph is not None else graph
     routing_nodes = sorted(set(participants) | set(rg.nodes()))
     route_map = _build_route_map(routing_nodes, rg, route_address_map)

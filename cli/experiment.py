@@ -175,10 +175,8 @@ NES_BUFFER_SIZE_BYTES = 262144
 
 
 def _flink_process_memory_mb(instance_type: str, fraction: float, fallback_mb: int) -> int:
-    """Flink process memory (MiB) as a fraction of the node's total RAM, leaving
-    the rest for the OS/Docker (and, on the sink node, the co-located tcp-sink
-    container). Falls back to fallback_mb for an instance type we don't have
-    specs for, rather than guessing."""
+    """Flink process memory (MiB): a fraction of total RAM, rest left for the
+    OS/Docker. Falls back to fallback_mb for an unlisted instance type."""
     total = AWS_INSTANCE_MEMORY_MB.get(instance_type)
     if total is None:
         return fallback_mb
@@ -186,30 +184,20 @@ def _flink_process_memory_mb(instance_type: str, fraction: float, fallback_mb: i
 
 
 def _worker_memory_mb(instance_type: str) -> int:
-    """Memory budget (MiB) for a dedicated worker node - one that runs nothing
-    but a single TaskManager/NES-worker process and so can use almost the
-    whole instance's memory, just enough held back for the OS/Docker daemon.
-    This is the single source of truth for that budget: Flink's TaskManager
-    uses it as its internal process.size, it's also applied as a docker
-    --memory cap on both the Flink TaskManager and the NES worker container
-    (see _worker_memory_flag) so the two engines are bounded by the same
-    per-node memory restriction on heterogeneous topologies, and NES's own
-    buffer-pool/hash-table sizing is derived from it too (see
-    _nes_memory_budget_mb) so NES pays a comparable "restricted node" tax
-    instead of running its old fixed sizing unconstrained on small nodes."""
+    """Memory budget (MiB) for a dedicated worker node running one
+    TaskManager/NES-worker process. Single source of truth: used as Flink's
+    process.size, as the docker --memory cap on both engines
+    (_worker_memory_flag), and to derive NES's buffer-pool/hash-table sizing
+    (_nes_memory_budget_mb), so both engines share the same per-node cap."""
     return _flink_process_memory_mb(instance_type, fraction=0.85, fallback_mb=2048)
 
 
 def _nes_memory_budget_mb(instance_type: str) -> tuple[int, int]:
-    """(global_buffer_pool_mb, max_hash_table_mb) for an NES coordinator/worker,
-    sized off the same per-node budget as Flink's TaskManager
-    (_worker_memory_mb) instead of NES's old fixed 1024m buffer pool / 2048m
-    hash-table ceiling, which stayed the same size regardless of node and so
-    ran effectively unconstrained on small/on-prem nodes while Flink was
-    already boxed in. Reserves NES_PROCESS_OVERHEAD_MB for the native
-    process/OS (NES is a C++ process - no JVM metaspace/framework tax), then
-    splits what's left 1:2 between buffer pool and max hash-table size, the
-    same ratio as the old fixed defaults (1024m : 2048m)."""
+    """(global_buffer_pool_mb, max_hash_table_mb), sized off the same
+    per-node budget as Flink's TaskManager (_worker_memory_mb), replacing
+    NES's old fixed 1024m/2048m ceiling that ignored node size. Reserves
+    NES_PROCESS_OVERHEAD_MB for the native process, splits the rest 1:2
+    (same ratio as the old defaults)."""
     total = _worker_memory_mb(instance_type)
     available = max(total - NES_PROCESS_OVERHEAD_MB, NES_MIN_AVAILABLE_MB)
     buffer_pool_mb = max(available // 3, 1)
@@ -758,11 +746,7 @@ async def _graceful_stop_tcp(
     names: list[str],
     timeout: int = 5,
 ) -> None:
-    """Send 'q' to each TCP streaming container's stdin, then force-remove.
-
-    All containers receive the quit signal in parallel.  After *timeout*
-    seconds any that have not exited on their own are force-removed.
-    """
+    """Send 'q' to each container's stdin in parallel, force-remove after *timeout*."""
     if not names:
         return
     cmds = " & ".join(
@@ -783,17 +767,10 @@ async def _poll_for_pattern(
     label: str = "",
     since: Optional[int] = None,
 ) -> None:
-    """Poll 'docker logs <container>' until *pattern* appears.
-
-    Prints new lines as they appear. Raises TimeoutError if the pattern
-    is not seen within *timeout* seconds.
-
-    *since* is an optional Unix timestamp; when set only logs produced
-    after that time are considered (useful for persistent containers).
-
-    Note: monitored containers must NOT be started with --rm, otherwise
-    Docker removes their log buffer on exit before we can read it.
-    """
+    """Poll 'docker logs <container>' until *pattern* appears, streaming new
+    lines; raises TimeoutError after *timeout* seconds. *since* (Unix
+    timestamp), if set, ignores earlier logs. Containers must not use --rm,
+    or Docker drops the log buffer on exit before it can be read."""
     since_flag = f"--since {since} " if since is not None else ""
     deadline = time.monotonic() + timeout
     shown: set[str] = set()
@@ -804,7 +781,6 @@ async def _poll_for_pattern(
         )
         output = result.stdout or ""
 
-        # Stream new lines to stdout
         for line in output.splitlines():
             if line and line not in shown:
                 shown.add(line)
@@ -844,11 +820,8 @@ def _cpus_flag(node: NodeInfo) -> str:
 
 
 def _worker_memory_flag(node: NodeInfo) -> str:
-    """Return a --memory docker flag sized from _worker_memory_mb(), so a
-    dedicated worker container (Flink TaskManager or NES worker) is bounded
-    by the same per-node memory budget on both engines - not just Flink,
-    which would otherwise self-limit via its own JVM config while an NES
-    worker container ran uncapped on the same node."""
+    """Return a --memory docker flag from _worker_memory_mb(), so Flink and
+    NES worker containers share the same per-node memory budget."""
     return f"--memory {_worker_memory_mb(node.instance_type)}m"
 
 
@@ -911,15 +884,9 @@ async def _wait_sink_done(
     since: int,
     timeout: float = DONE_TIMEOUT,
 ) -> None:
-    """Wait for the sink to signal end-of-repetition.
-
-    The TCP source containers stay up across repetitions and typically log
-    "Waiting for q..." after sending their current batch, so the sink log is
-    the reliable end-of-repetition signal here.
-
-    *since* is a Unix timestamp; only log lines produced after that time
-    are checked, so signals from earlier repetitions are ignored.
-    """
+    """Wait for the sink to signal end-of-repetition (the reliable signal,
+    since source containers stay up across reps). *since* is a Unix
+    timestamp filtering out signals from earlier repetitions."""
     await _poll_for_pattern(
         snk_conn,
         sink_name,
@@ -1526,15 +1493,10 @@ def _desired_nes_topology_links(
 ) -> list[tuple[str, str]]:
     """Return NES parent->child links derived from source->sink topology edges.
 
-    sink_topology_id is handled specially: it's not in worker_topology_ids
-    (the sink isn't a placement worker_node), but it IS a real NES worker
-    (the coordinator's own local worker role, always workerId 1 in practice).
-    An edge like "N1 -> snk" is a real link that should make N1 a direct
-    child of the coordinator - dropping it (treating sink_topology_id like
-    any other non-worker node, e.g. "src") would silently lose that
-    connection for any node that also happens to be a child in some other
-    worker-to-worker edge, since _reconcile_nes_worker_topology strips a
-    node's default root attachment as soon as it appears as a child anywhere.
+    sink_topology_id is handled specially: it's not a placement worker_node,
+    but it IS a real NES worker (the coordinator's local role, workerId 1),
+    so an edge like "N1 -> snk" must still make N1 the coordinator's direct
+    child, not get dropped like a true non-worker node such as "src".
     """
     desired_links: list[tuple[str, str]] = []
     seen_links: set[tuple[str, str]] = set()
@@ -2234,10 +2196,8 @@ async def _run_flink_repetition(
     topology_name: str,
 ) -> None:
     """Submit the SQL query and wait for sink completion and Flink job finish.
-
-    All containers (sources, sink, Flink cluster) are already running and
-    stay up for the entire experiment; only the sql-client is started here.
-    """
+    Other containers are already running for the whole experiment; only the
+    sql-client is started here."""
     rep_start = int(time.time())
     print(f"\n--- Repetition {rep}/{total_reps} ---")
     sql_name = f"flink-sql-{exp.name}-r{rep}-{rep_start}"
@@ -3035,17 +2995,12 @@ async def _wait_nes_query_running(
 ) -> None:
     """Poll NES's /query-status until the submitted query leaves REGISTERED/OPTIMIZING.
 
-    AddQueryRequest.cpp (nebulastream-private) enqueues the placement
-    amendment and returns without ever calling the amendment's getFuture()
-    - unlike StopQueryRequest/FailQueryRequest, which do. So when placement
-    genuinely fails (e.g. nes_num_slots/nes_coordinator_num_slots too tight
-    for the query's operator count), TopDownStrategy throws cleanly
-    (identifyPinningLocation: "No node available for further placement of
-    operators"), PlacementAmendmentInstance::execute() catches it and
-    resolves its completion promise to false - and nothing ever reads that
-    promise. The query's status just stays OPTIMIZING forever with no error
-    anywhere. Without this poll, _run_nes_repetition would silently wait out
-    the full sink-done timeout for a query that in fact never started.
+    Needed because AddQueryRequest.cpp never awaits its placement amendment's
+    future (unlike Stop/FailQueryRequest): a genuine placement failure (e.g.
+    nes_num_slots too tight) resolves that future to false internally, but
+    nothing reads it, so status just stays OPTIMIZING forever with no error.
+    Without this poll, a query that never started would silently run out the
+    full sink-done timeout instead.
     """
     deadline = time.monotonic() + timeout
     status = "UNKNOWN"
@@ -3085,20 +3040,14 @@ async def _wait_nes_query_running(
 async def _stop_nes_query(snk_conn: asyncssh.SSHClientConnection, query_id: int) -> bool:
     """Explicitly stop a finished NES query via DELETE /stop-query.
 
-    A query that finishes on its own (source EOF -> soft stop) only updates
-    QueryCatalog's decomposed-plan status to STOPPED, for REST status
-    reporting - it never touches SharedQueryPlan's own status, so
-    PlacementRemovalStrategy (which releases the topology slots the query
-    occupied, via TopologyNode::releaseSlots) never runs. Only the explicit
-    DELETE /stop-query path (StopQueryRequest.cpp) does that. Unlike
-    /execute-query, it synchronously awaits the placement-removal amendment
-    before the HTTP response comes back (RequestHandlerService::
-    validateAndQueueStopQueryRequest calls future.get()), so this call
-    returning is enough confirmation - no separate poll needed. Without
-    this, a query's slots leak permanently on a long-lived coordinator,
-    since nothing else ever releases them (see nes_restart_after_stop,
-    which works around the same leak by restarting the whole cluster
-    instead of relying on this).
+    A query that finishes on its own only marks itself STOPPED for REST
+    reporting; it never releases its topology slots (TopologyNode::
+    releaseSlots), which only the explicit DELETE /stop-query path
+    (StopQueryRequest.cpp) triggers. That path synchronously awaits the
+    placement-removal amendment, so this call returning is confirmation
+    enough -- no separate poll needed. Skipping this leaks slots permanently
+    on a long-lived coordinator (nes_restart_after_stop works around the
+    same leak differently, by restarting the whole cluster).
     """
     stop_cmd = (
         f"curl -sS -X DELETE "
