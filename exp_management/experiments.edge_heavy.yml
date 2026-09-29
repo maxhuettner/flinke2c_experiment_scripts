@@ -1,127 +1,213 @@
-repetitions: 11
+# Example experiment batch definition for `sim experiment`.
+#
+# Usage:
+#   sim experiment \
+#     -f config/topologies/edge-heavy.json \
+#     -e exp_management/experiments.edge_heavy.det.yml \
+#     -o results/
+#
+# Combines the baseline flink, flinke2c (TOP_DOWN/BOTTOM_UP graphml), CAPSYS
+# and DETERMINISTIC placement variants for edge-heavy in one file -
+# merges experiments.edge_heavy.yml (minus its nes entries) and
+# experiments.edge_heavy.capsys.yml, plus the DETERMINISTIC entries below.
+# Grouped by query, each query's entries ordered flink -> det -> flinke2c ->
+# capsys.
+#
+# placement_method: DETERMINISTIC reuses the CAPSYS mechanism (Flink still
+# gets "cluster.placement-method: CAPSYS" on the wire - see
+# _flink_wire_placement_method in cli/experiment.py) but stages a fixed,
+# reproducible schedulercfg from capsys/deterministic/ instead of a
+# DFS-searched, per-repetition one. Same operator always lands on the same
+# node, every repetition, every run.
+#
+# Generate/refresh those files with:
+#   python3 capsys/generate_deterministic_placement.py \
+#     --topology edge-heavy --queries q1 q2 q3 q4 q5 q7 q8
+#
+# See capsys/generate_deterministic_placement.py's module docstring for the
+# assignment algorithm, the capsys/operator_graphs/ cache, and how to do
+# this for a topology with no profiled CAPSYS data at all (e.g. wan) or a
+# query CAPSYS's DFS can never plan for (q5/q7 - multiple downstream
+# operators).
+
+repetitions: 10
 
 experiments:
-  - name: flink_q1_edge_heavy
+  # ── q1 ──────────────────────────────────────────────────────────────────
+  - name: flink_q1_eh
     system: flink
     query: q1
 
-  - name: flink_q2_edge_heavy
+  - name: flink_det_q1_eh
     system: flink
-    query: q2
+    placement_method: DETERMINISTIC
+    query: q1
 
-  - name: flink_q3_edge_heavy
-    system: flink
-    query: q3
-
-  - name: flink_q4_edge_heavy
-    system: flink
-    query: q4
-    num_task_slots: 3
-
-  - name: flink_q5_edge_heavy
-    system: flink
-    query: q5
-
-  - name: flink_q7_edge_heavy
-    system: flink
-    query: q7
-
-  - name: flink_q8_edge_heavy
-    system: flink
-    query: q8
-
-  - name: flinke2c_td_q1_edge_heavy
+  - name: flinke2c_td_q1_eh
     system: flink
     query: q1
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q1_edge_heavy
+  - name: flinke2c_bu_q1_eh
     system: flink
     query: q1
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q2_edge_heavy
+  - name: capsys_q1_eh
+    system: flink
+    placement_method: CAPSYS
+    query: q1
+
+  # ── q2 ──────────────────────────────────────────────────────────────────
+  - name: flink_q2_eh
+    system: flink
+    query: q2
+
+  - name: flink_det_q2_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q2
+
+  - name: flinke2c_td_q2_eh
     system: flink
     query: q2
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q2_edge_heavy
+  - name: flinke2c_bu_q2_eh
     system: flink
     query: q2
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q3_edge_heavy
+  - name: capsys_q2_eh
+    system: flink
+    placement_method: CAPSYS
+    query: q2
+
+  # ── q3 ──────────────────────────────────────────────────────────────────
+  - name: flink_q3_eh
+    system: flink
+    query: q3
+
+  - name: flink_det_q3_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q3
+
+  - name: flinke2c_td_q3_eh
     system: flink
     query: q3
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q3_edge_heavy
+  - name: flinke2c_bu_q3_eh
     system: flink
     query: q3
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q4_edge_heavy
+  - name: capsys_q3_eh
+    system: flink
+    placement_method: CAPSYS
+    query: q3
+
+  # ── q4 ──────────────────────────────────────────────────────────────────
+  - name: flink_q4_eh
+    system: flink
+    query: q4
+
+  - name: flink_det_q4_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q4
+
+  - name: flinke2c_td_q4_eh
     system: flink
     query: q4
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q4_edge_heavy
+  - name: flinke2c_bu_q4_eh
     system: flink
     query: q4
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q5_edge_heavy
+  - name: capsys_q4_eh
+    system: flink
+    placement_method: CAPSYS
+    query: q4
+
+  # ── q5 ──────────────────────────────────────────────────────────────────
+  - name: flink_q5_eh
+    system: flink
+    query: q5
+
+  - name: flink_det_q5_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q5
+
+  - name: flinke2c_td_q5_eh
     system: flink
     query: q5
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q5_edge_heavy
+  - name: flinke2c_bu_q5_eh
     system: flink
     query: q5
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q7_edge_heavy
+  # ── q7 ──────────────────────────────────────────────────────────────────
+  - name: flink_q7_eh
+    system: flink
+    query: q7
+
+  - name: flink_det_q7_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q7
+
+  - name: flinke2c_td_q7_eh
     system: flink
     query: q7
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q7_edge_heavy
+  - name: flinke2c_bu_q7_eh
     system: flink
     query: q7
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_td_q8_edge_heavy
+  # ── q8 ──────────────────────────────────────────────────────────────────
+  - name: flink_q8_eh
+    system: flink
+    query: q8
+
+  - name: flink_det_q8_eh
+    system: flink
+    placement_method: DETERMINISTIC
+    query: q8
+
+  - name: flinke2c_td_q8_eh
     system: flink
     query: q8
     placement_method: TOP_DOWN
     graphml_file: edge-heavy.graphml
 
-  - name: flinke2c_bu_q8_edge_heavy
+  - name: flinke2c_bu_q8_eh
     system: flink
     query: q8
     placement_method: BOTTOM_UP
     graphml_file: edge-heavy.graphml
 
-  - name: nes_q1_edge_heavy
-    system: nes
-    query: q1
-
-  - name: nes_q4_edge_heavy
-    system: nes
-    query: q4
-
-  - name: nes_q5_edge_heavy
-    system: nes
-    query: q5
+  - name: capsys_q8_eh
+    system: flink
+    placement_method: CAPSYS
+    query: q8

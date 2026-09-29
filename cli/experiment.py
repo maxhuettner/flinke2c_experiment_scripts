@@ -865,7 +865,7 @@ async def _sync_source_data(
     print(f"Syncing source data to {src.user}@{src.host}:{src_home}/data/ ...")
     proc = await asyncio.create_subprocess_exec(
         "rsync", "--checksum", "--archive", "--verbose", "--human-readable",
-        "-e", f"ssh -i {_expand(key_path)} -o StrictHostKeyChecking=no -o BatchMode=yes",
+        "-e", f"ssh -i {_expand(key_path)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o BatchMode=yes",
         str(SOURCE_DATA_DIR) + "/",
         f"{src.user}@{src.host}:{src_home}/data/",
         stdout=asyncio.subprocess.PIPE,
@@ -894,7 +894,7 @@ async def _sync_flink_libs(
     print(f"  Syncing {len(jars)} lib JAR(s) to {node.id}...")
     proc = await asyncio.create_subprocess_exec(
         "rsync", "--checksum", "--archive", "--verbose",
-        "-e", f"ssh -i {_expand(key_path)} -o StrictHostKeyChecking=no -o BatchMode=yes",
+        "-e", f"ssh -i {_expand(key_path)} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o BatchMode=yes",
         str(FLINK_LIB_DIR) + "/",
         f"{node.user}@{node.host}:{node_home}/flinke2c-lib/",
         stdout=asyncio.subprocess.PIPE,
