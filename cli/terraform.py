@@ -13,11 +13,8 @@ _DEFAULTS = dict(
     aws_region="eu-central-1",
     vpc_cidr="10.42.0.0/16",
     public_subnet_cidr="10.42.0.0/20",
-    # Allow SSH from anywhere (lab usage).
-    ssh_ingress_cidrs=["0.0.0.0/0"],
-    # Allow WireGuard from anywhere so nodes can reach each other.
-    # Without this the Terraform security group has no WireGuard ingress rule
-    # and inter-node tunnels fail silently.
+    ssh_ingress_cidrs=["0.0.0.0/0"],  # lab usage
+    # Without this, inter-node WireGuard tunnels fail silently.
     wireguard_ingress_cidrs=["0.0.0.0/0"],
     wireguard_udp_port=51820,
     wireguard_udp_port_max=51999,
@@ -72,13 +69,9 @@ def _cloud_nodes_by_region(
 
 
 def _cloud_transit_nodes(graph: nx.Graph) -> set[str]:
-    """Return provisioned cloud nodes that forward traffic for other nodes.
-
-    Any cloud node that appears as an interior hop on a shortest path between
-    two topology nodes may need to route packets that are neither sourced from
-    nor destined to itself. Those EC2 instances must have source/dest check
-    disabled or AWS will drop the forwarded traffic.
-    """
+    """Return provisioned cloud nodes on some shortest path's interior --
+    those EC2 instances need source/dest check disabled or AWS drops the
+    forwarded traffic."""
     node_ids = sorted(graph.nodes())
     transit_nodes: set[str] = set()
 
@@ -96,12 +89,8 @@ def _cloud_transit_nodes(graph: nx.Graph) -> set[str]:
 
 
 def _infer_aws_subnet_for_ips(ips: list[ipaddress.IPv4Address]) -> Optional[ipaddress.IPv4Network]:
-    """Return an AWS-valid subnet (/24.. /16) containing all IPs.
-
-    We intentionally avoid very small inferred subnets like /28 because
-    topology node addresses may use low host IPs (for example .15), which can
-    accidentally become the subnet broadcast address.
-    """
+    """Return an AWS-valid subnet (/24../16) containing all IPs. Stays above
+    /24 since a low host IP like .15 could land on a /28's broadcast address."""
     if not ips:
         return None
     first = min(ips)
@@ -253,8 +242,7 @@ def _build_region_tfvars(
         }
         if node_id in transit_nodes:
             instance["source_dest_check"] = False
-        # Cloud nodes use their topology address as the EC2 private IP within
-        # their region-local VPC so same-region links can use native routing.
+        # Topology address becomes the EC2 private IP, for native routing.
         if node.address:
             try:
                 node_ip = ipaddress.IPv4Address(node.address)
@@ -297,8 +285,7 @@ def _build_region_tfvars(
             "Terraform may fail to apply"
         )
 
-    # AWS reserves the first 4 and last IP in every subnet, so those addresses
-    # can never be assigned to instances. Fail fast with an actionable error.
+    # AWS reserves the first 4 and last IP in every subnet.
     final_subnet = ipaddress.IPv4Network(effective_public_subnet_cidr, strict=False)
     reserved = _aws_reserved_addresses(final_subnet)
     invalid_assignments: list[str] = []

@@ -1,0 +1,16 @@
+{
+  "query": "q7",
+  "source": "mapping-json:capsys/expjson/local_sql.json",
+  "operators": [
+    "Sink: nexmark_q7[13]",
+    "Calc[12]",
+    "Join[11]",
+    "Calc[3]",
+    "Calc[9]",
+    "GlobalWindowAggregate[8]",
+    "LocalWindowAggregate[6]",
+    "Calc[5]",
+    "WatermarkAssigner[2]",
+    "Source: bids[1]"
+  ]
+}

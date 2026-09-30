@@ -95,21 +95,35 @@ def choose_job(base_url: str, job_id: str) -> tuple[str, str]:
 
 def build_mapping(
     plan_nodes: list[dict], vertex_names: dict[str, str]
-) -> tuple[dict[str, str], list[dict[str, int]]]:
+) -> tuple[dict[str, str], list[dict[str, int]], list[list[str]]]:
     used_labels: set[str] = set()
     mapping: dict[str, str] = {}
+    id_to_label: dict[str, str] = {}
     srcratelist: list[dict[str, int]] = []
 
     for node in plan_nodes:
         description = node["description"]
         sanitized = sanitize_operator_name(description)
         label = uniquify(simple_label(description), used_labels)
-        mapping[sanitized] = vertex_names.get(node["id"], label)
+        display = vertex_names.get(node["id"], label)
+        mapping[sanitized] = display
+        id_to_label[node["id"]] = display
 
         if is_source_description(description):
             srcratelist.append({label: 1000})
 
-    return mapping, srcratelist
+    # [parent, child] pairs (data flows parent -> child), by display label -
+    # lets a placement algorithm traverse the real operator DAG (e.g. BFS
+    # from the sink) instead of just Flink's plan-enumeration order.
+    edges: list[list[str]] = []
+    for node in plan_nodes:
+        child = id_to_label[node["id"]]
+        for inp in node.get("inputs", []):
+            parent = id_to_label.get(inp["id"])
+            if parent:
+                edges.append([parent, child])
+
+    return mapping, srcratelist, edges
 
 
 def main() -> int:
@@ -170,7 +184,7 @@ def main() -> int:
         return 1
 
     vertex_names = {vertex["id"]: vertex["name"] for vertex in job.get("vertices", [])}
-    mapping, srcratelist = build_mapping(plan_nodes, vertex_names)
+    mapping, srcratelist, edges = build_mapping(plan_nodes, vertex_names)
     if srcratelist:
         srcratelist = [{label: args.source_rate} for item in srcratelist for label in item]
 
@@ -179,6 +193,7 @@ def main() -> int:
     config["jmpt"] = args.port
     config["jobid"] = job_id
     config["mapping"] = mapping
+    config["edges"] = edges
     config["srcratelist"] = srcratelist or config.get("srcratelist", [])
     config["schedulercfg1st"] = []
     config.setdefault("use_single_process_plan", True)

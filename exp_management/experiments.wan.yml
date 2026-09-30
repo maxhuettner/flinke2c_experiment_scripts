@@ -3,8 +3,14 @@ num_task_slots: 1
 bid_src_extra_arg: --num-events 920000
 
 experiments:
+  # ── q1 ──────────────────────────────────────────────────────────────────
   - name: flink_q1_wan
     system: flink
+    query: q1
+
+  - name: flink_det_q1_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q1
 
   - name: flinke2c_td_q1_wan
@@ -19,8 +25,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q2 ──────────────────────────────────────────────────────────────────
   - name: flink_q2_wan
     system: flink
+    query: q2
+
+  - name: flink_det_q2_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q2
 
   - name: flinke2c_td_q2_wan
@@ -35,8 +47,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q3 ──────────────────────────────────────────────────────────────────
   - name: flink_q3_wan
     system: flink
+    query: q3
+
+  - name: flink_det_q3_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q3
 
   - name: flinke2c_td_q3_wan
@@ -51,8 +69,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q4 ──────────────────────────────────────────────────────────────────
   - name: flink_q4_wan
     system: flink
+    query: q4
+
+  - name: flink_det_q4_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q4
 
   - name: flinke2c_td_q4_wan
@@ -67,8 +91,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q5 ──────────────────────────────────────────────────────────────────
   - name: flink_q5_wan
     system: flink
+    query: q5
+
+  - name: flink_det_q5_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q5
 
   - name: flinke2c_td_q5_wan
@@ -83,8 +113,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q7 ──────────────────────────
   - name: flink_q7_wan
     system: flink
+    query: q7
+
+  - name: flink_det_q7_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q7
 
   - name: flinke2c_td_q7_wan
@@ -99,8 +135,14 @@ experiments:
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
 
+  # ── q8 ──────────────────────────────────────────────────────────────────
   - name: flink_q8_wan
     system: flink
+    query: q8
+
+  - name: flink_det_q8_wan
+    system: flink
+    placement_method: DETERMINISTIC
     query: q8
 
   - name: flinke2c_td_q8_wan
@@ -114,15 +156,3 @@ experiments:
     query: q8
     placement_method: BOTTOM_UP
     graphml_file: wan.graphml
-  
-  - name: nes_q1_wan
-    system: nes
-    query: q1
-
-  - name: nes_q4_wan
-    system: nes
-    query: q4
-
-  - name: nes_q5_wan
-    system: nes
-    query: q5

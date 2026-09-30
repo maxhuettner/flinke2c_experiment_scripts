@@ -1,0 +1,6 @@
+# Coordinator configuration for the CAPSys placement file.
+# Mount capsys/examples/imputation-two-node.schedulercfg in the coordinator
+# container as /conf/schedulercfg.
+cluster:
+  placement-method: CAPSYS
+cluster.capsys.scheduler-cfg.path: /conf/schedulercfg

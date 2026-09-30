@@ -1,0 +1,162 @@
+# Example experiment batch definition for `sim experiment`.
+#
+# Usage:
+#   sim experiment \
+#     -f config/topologies/edge-to-cloud.json \
+#     -e exp_management/experiments.example.yml \
+#     -o results/
+#
+# Top-level fields:
+#   repetitions       - global default repetitions for all experiments (optional)
+#
+# Fields per experiment:
+#   name              - identifier; also used as the log output subdirectory
+#   system            - streaming system to use (currently only "flink")
+#   query             - query name, resolves to exp_management/queries/flink/<name>.sql
+#   repetitions       - per-experiment override (defaults to top-level repetitions or 1)
+#   placement_method  - "" (default) or e.g. "TOP_DOWN". For system: flink, enables
+#                       topology-aware placement (graphml). For system: nes, selects
+#                       the NES placement strategy (TOP_DOWN, BOTTOM_UP, IFCOP, ILP,
+#                       ML_HEURISTIC, ELEGANT_PERFORMANCE/ENERGY/BALANCED); unset
+#                       defaults to NES's own TopDown strategy.
+#   graphml_file      - graphml filename in exp_management/configs/flink/coordinator/
+#                       (optional; defaults to <topology-stem>.graphml when placement_method is set)
+#   num_task_slots    - override the task slot count from query_config.yml (optional)
+#   nes_num_slots     - override NES worker numberOfSlots (system: nes only).
+#                       Unset: workers default to unlimited.
+#   nes_coordinator_num_slots
+#                     - override NES coordinator numberOfSlots (system: nes
+#                       only). Defaults to 1.
+#   flink_rocksdb     - state.backend: rocksdb (system: flink only). Default (unset)
+#                       is on. Off relies purely on the instance-type-sized heap
+#                       (see _flink_process_memory_mb) instead of RocksDB's
+#                       off-heap/disk storage to survive q4's 24h-window state.
+#
+# Per-query extra arguments (e.g. --num-events, num_task_slots) are read from
+# exp_management/configs/flink/query_config.yml and can be overridden here.
+
+repetitions: 5
+flink_rocksdb: false
+
+experiments:
+  - name: nes_q1_eh
+    system: nes
+    query: q1
+    placement_method: TOP_DOWN
+
+  - name: nes_q4_eh
+    system: nes
+    query: q4
+    placement_method: TOP_DOWN
+    nes_num_slots: 8
+    nes_coordinator_num_slots: 2
+
+  - name: nes_q5_eh
+    system: nes
+    query: q5
+    placement_method: TOP_DOWN
+    nes_num_slots: 10
+    nes_coordinator_num_slots: 2
+
+  - name: flink_q1_nes_eh
+    system: flink
+    query: q1_nes
+    source_schema: nes
+
+  - name: flink_q4_nes_eh
+    system: flink
+    query: q4_nes
+    source_schema: nes
+
+  - name: flink_q5_nes_eh
+    system: flink
+    query: q5_nes
+    source_schema: nes
+
+  - name: flinke2c_td_q1_nes_eh
+    system: flink
+    query: q1_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q1_nes_eh
+    system: flink
+    query: q1_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_td_q4_nes_eh
+    system: flink
+    query: q4_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q4_nes_eh
+    system: flink
+    query: q4_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_td_q5_nes_eh
+    system: flink
+    query: q5_nes
+    source_schema: nes
+    placement_method: TOP_DOWN
+    graphml_file: edge-heavy.graphml
+
+  - name: flinke2c_bu_q5_nes_eh
+    system: flink
+    query: q5_nes
+    source_schema: nes
+    placement_method: BOTTOM_UP
+    graphml_file: edge-heavy.graphml
+
+  # Experiments for edge-to-cloud topology with NES schema, with explicit task slot counts for q4 and q5.
+
+  # - name: flink_q4_nes_8_eh
+  #   system: flink
+  #   query: q4_nes
+  #   num_task_slots: 8
+  #   source_schema: nes
+
+  # - name: flink_q5_nes_10_eh
+  #   system: flink
+  #   query: q5_nes
+  #   num_task_slots: 10
+  #   source_schema: nes
+
+  # - name: flinke2c_td_q4_nes_8_eh
+  #   system: flink
+  #   query: q4_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   num_task_slots: 8
+  #   graphml_file: edge-heavy.graphml
+
+  # - name: flinke2c_bu_q4_nes_8_eh
+  #   system: flink
+  #   query: q4_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   num_task_slots: 8
+  #   graphml_file: edge-heavy.graphml
+
+  # - name: flinke2c_td_q5_nes_10_eh
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: TOP_DOWN
+  #   num_task_slots: 10
+  #   graphml_file: edge-heavy.graphml
+
+  # - name: flinke2c_bu_q5_nes_10_eh
+  #   system: flink
+  #   query: q5_nes
+  #   source_schema: nes
+  #   placement_method: BOTTOM_UP
+  #   num_task_slots: 10
+  #   graphml_file: edge-heavy.graphml

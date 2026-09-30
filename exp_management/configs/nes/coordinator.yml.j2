@@ -4,12 +4,16 @@ restIp: 127.0.0.1
 coordinatorHost: {{ nes_coordinator_host_ip }}
 restPort: 8081
 
+optimizer:
+  distributedJoinOptimizationMode: MATRIX
+
 worker:
   localWorkerHost: {{ nes_coordinator_host_ip }}
   coordinatorHost: {{ nes_coordinator_host_ip }}
   numberOfBuffersInGlobalBufferManager: 4096
   numberOfBuffersInSourceLocalBufferPool: 1024
   bufferSizeInBytes: 262144
+  # numberOfSlots: 1
 
   queryCompiler:
     maxHashTableSize: 2147483648

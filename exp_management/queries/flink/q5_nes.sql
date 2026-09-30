@@ -1,0 +1,71 @@
+CREATE TABLE
+  nexmark_q5 (
+    auction BIGINT,
+    num BIGINT,
+    latency_ts BIGINT
+  )
+WITH (
+  'connector' = 'tcp-sink',
+  'host' = '10.10.0.10',
+  'port' = '9000'
+);
+
+INSERT INTO
+  nexmark_q5
+SELECT
+  AuctionBids.auction,
+  AuctionBids.num,
+  AuctionBids.latency_ts
+FROM
+  (
+    SELECT
+      auction,
+      count(*) AS num,
+      MAX(latency_ts) AS latency_ts,
+      window_start AS starttime,
+      window_end AS endtime
+    FROM
+      TABLE (
+        HOP (
+          TABLE bids,
+          DESCRIPTOR (`dateTime`),
+          INTERVAL '2' SECOND,
+          INTERVAL '10' SECOND
+        )
+      )
+    GROUP BY
+      auction,
+      window_start,
+      window_end
+  ) AS AuctionBids
+  JOIN (
+    SELECT
+      max(CountBids.num) AS maxn,
+      CountBids.starttime,
+      CountBids.endtime
+    FROM
+      (
+        SELECT
+          count(*) AS num,
+          window_start AS starttime,
+          window_end AS endtime
+        FROM
+          TABLE (
+            HOP (
+              TABLE bids,
+              DESCRIPTOR (`dateTime`),
+              INTERVAL '2' SECOND,
+              INTERVAL '10' SECOND
+            )
+          )
+        GROUP BY
+          auction,
+          window_start,
+          window_end
+      ) AS CountBids
+    GROUP BY
+      CountBids.starttime,
+      CountBids.endtime
+  ) AS MaxBids ON AuctionBids.starttime = MaxBids.starttime
+  AND AuctionBids.endtime = MaxBids.endtime
+  AND AuctionBids.num >= MaxBids.maxn;

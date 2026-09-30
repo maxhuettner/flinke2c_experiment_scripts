@@ -58,15 +58,20 @@ def load_topology(path: str) -> nx.Graph:
             "id", "node_type", "address", "speed", "provision", "location",
             "instance_type", "cloud_instance_type", "ami",
         }
+        location = nd.get("location", "cloud")
+        is_on_prem = str(location).strip().lower().replace("_", "-") in ("onprem", "on-prem")
+        # Real hardware, not an AWS instance -- don't size it as a 1GiB cloud
+        # default (see AWS_INSTANCE_MEMORY_MB).
+        default_instance_type = "on-prem" if is_on_prem else "t3.micro"
         node = TopoNode(
             id=nd["id"],
             node_type=nd.get("node_type", "Compute"),
             address=nd.get("address", ""),
             speed=int(nd["speed"]) if nd.get("speed") is not None else None,
             provision=nd.get("provision", "auto"),
-            location=nd.get("location", "cloud"),
+            location=location,
             # Backward-compatible alias: cloud_instance_type.
-            instance_type=nd.get("instance_type", nd.get("cloud_instance_type", "t3.micro")),
+            instance_type=nd.get("instance_type", nd.get("cloud_instance_type", default_instance_type)),
             ami=nd.get("ami"),
             extra={k: v for k, v in nd.items() if k not in known},
         )
@@ -85,11 +90,7 @@ def load_topology(path: str) -> nx.Graph:
 
 
 def _add_implicit_all_to_all_edges(graph: nx.Graph) -> None:
-    """Expand same-location ``network_type=all-to-all`` groups into edges.
-
-    This keeps the JSON concise for flat cloud regions while still giving the
-    routing and provisioning code an explicit graph to work with.
-    """
+    """Expand same-location ``network_type=all-to-all`` groups into edges."""
     groups: dict[str, list[str]] = {}
 
     for node_id in graph.nodes():

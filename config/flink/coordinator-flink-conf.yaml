@@ -47,6 +47,8 @@ state.backend.local-recovery: true
 #===============================================================================
 # Runtime
 #===============================================================================
+classloader.resolve-order: parent-first
+classloader.parent-first-patterns.additional: org.example.flinke2c
 
 table.exec.mini-batch.enabled: true
 table.exec.mini-batch.allow-latency: 2s

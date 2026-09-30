@@ -1,0 +1,18 @@
+{
+  "query": "q4",
+  "source": "reference-schedulercfg:edge-to-cloud",
+  "operators": [
+    "Sink: nexmark_q4[16]",
+    "Source: auctions[1]",
+    "GroupAggregate[12]",
+    "Calc[13]",
+    "GroupAggregate[15]",
+    "Calc[10]",
+    "WatermarkAssigner[2]",
+    "Calc[3]",
+    "Source: bids[5]",
+    "WatermarkAssigner[6]",
+    "Calc[7]",
+    "Join[9]"
+  ]
+}

@@ -1,0 +1,1 @@
+Query::from("bids").filter(Attribute("auction") % 123 == 0).project(Attribute("auction"), Attribute("price")).sink(TcpSinkDescriptor::create("10.10.0.10", 9000));

@@ -1,0 +1,19 @@
+{
+  "query": "q8",
+  "source": "reference-schedulercfg:edge-to-cloud",
+  "operators": [
+    "Sink: nexmark_q8[17]",
+    "Source: persons[1]",
+    "WatermarkAssigner[2]",
+    "WindowJoin[15]",
+    "Calc[16]",
+    "Source: auctions[8]",
+    "Calc[3]",
+    "LocalWindowAggregate[4]",
+    "WatermarkAssigner[9]",
+    "Calc[10]",
+    "GlobalWindowAggregate[13]",
+    "GlobalWindowAggregate[6]",
+    "LocalWindowAggregate[11]"
+  ]
+}
